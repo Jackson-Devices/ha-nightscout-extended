@@ -1,0 +1,7 @@
+{
+  "entries": [
+    {"minutes_before_anchor": 6, "sgv": 172, "direction": "Flat"},
+    {"minutes_before_anchor": 1, "sgv": 184, "direction": "FortyFiveUp"}
+  ],
+  "device": "h2-synthetic-replay"
+}
