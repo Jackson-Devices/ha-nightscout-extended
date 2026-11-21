@@ -197,7 +197,9 @@ async def test_card_is_served_and_loaded_on_dashboards(hass: HomeAssistant, hass
     hass.config.components.add("frontend")  # the test harness has no frontend package
     await _setup(hass, aioclient_mock)
 
-    assert added == [f"{card.CARD_URL}?v=0.3.0"]
+    manifest = Path(__file__).parent.parent / "custom_components" / DOMAIN / "manifest.json"
+    version = json.loads(manifest.read_text())["version"]
+    assert added == [f"{card.CARD_URL}?v={version}"]
     client = await hass_client()
     resp = await client.get(card.CARD_URL)
     assert resp.status == 200
