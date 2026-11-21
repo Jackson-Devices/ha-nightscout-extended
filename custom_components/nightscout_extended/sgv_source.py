@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -103,6 +104,22 @@ def _merge_snapshot(
             raise NightscoutConnectionError("Conflicting Nightscout SGV snapshot versions")
     elif modified is not None and (old_modified is None or modified > old_modified):
         snapshot[key] = reading
+
+
+def _range_dates(page: Any, limit: int, start: int, end: int) -> list[int]:
+    if not isinstance(page, list) or len(page) > limit:
+        raise NightscoutConnectionError("Invalid Nightscout SGV range page")
+    dates = []
+    for row in page:
+        if not isinstance(row, dict) or not _text(row.get("type")):
+            raise NightscoutConnectionError("Unexpected Nightscout SGV range entry")
+        date = row.get("date")
+        if type(date) not in (int, float) or not start <= date < end:
+            raise NightscoutConnectionError("Invalid or out-of-range Nightscout SGV date")
+        if row["type"] == "sgv":
+            _identity(row)
+        dates.append(math.floor(date))
+    return dates
 
 
 class NightscoutSGVSource:
@@ -227,7 +244,7 @@ class NightscoutSGVSource:
         raise SGVReconciliationRequired("Nightscout SGV history paging bound exceeded")
 
     async def _v3_range_page(
-        self, start: int, end: int, *, skip: int = 0
+        self, start: int, end: int, *, sort: str = "date", skip: int = 0
     ) -> tuple[list[Any], int]:
         while True:
             limit = self._search_limit
@@ -238,7 +255,7 @@ class NightscoutSGVSource:
                         "type": "sgv",
                         "date$gte": str(start),
                         "date$lt": str(end),
-                        "sort": "date",
+                        "sort": sort,
                         "limit": str(limit),
                         "skip": str(skip),
                     },
@@ -246,7 +263,7 @@ class NightscoutSGVSource:
             except _V3PageLimitError:
                 if limit == 1 or skip:
                     raise
-                self._search_limit = max(1, limit // 2)
+                self._search_limit = (limit + 1) // 2
             else:
                 return _v3_result(response, _V3_ENTRIES, list), limit
 
@@ -261,79 +278,103 @@ class NightscoutSGVSource:
             },
         )
 
+    async def _merge_v3_cohort(
+        self, timestamp: int, snapshot: dict[str, dict[str, Any]], pages: Iterator[int]
+    ) -> None:
+        # Old SEARCH implementations did not include _id as a final sort
+        # key. Request the unique storage key explicitly for offset paging.
+        skip = 0
+        anchor = None
+        seen = set()
+        for _ in pages:
+            page, limit = await self._v3_range_page(
+                timestamp, timestamp + 1, sort="_id", skip=skip,
+            )
+            dates = _range_dates(page, limit, timestamp, timestamp + 1)
+            ids = [_identity(row) for row in page]
+            if anchor is not None and (not ids or ids[0] != anchor):
+                raise NightscoutConnectionError("Unstable Nightscout SGV range timestamp cohort")
+
+            # Repeat the previous page's last ID. If an intervening insert
+            # or deletion shifts the offset, abandon this snapshot.
+            offset = int(anchor is not None)
+            for key, row, date in zip(ids[offset:], page[offset:], dates[offset:], strict=True):
+                if key in seen:
+                    raise NightscoutConnectionError("Repeated source identity in Nightscout SGV range cohort")
+                seen.add(key)
+                _merge_snapshot(snapshot, row, date, v3=True)
+
+            if len(page) < limit:
+                return
+            if limit == 1:
+                raise NightscoutConnectionError("Cannot overlap a saturated Nightscout SGV range timestamp")
+            anchor = ids[-1]
+            skip += limit - 1
+
+        raise NightscoutConnectionError("Nightscout SGV range paging bound exceeded")
+
+    async def _read_v3_range(self, start: int, end: int) -> list[dict[str, Any]]:
+        snapshot: dict[str, dict[str, Any]] = {}
+        pending = [(start, end)]
+        pages = iter(range(_MAX_RANGE_PAGES))
+        while pending:
+            if next(pages, None) is None:
+                raise NightscoutConnectionError("Nightscout SGV range paging bound exceeded")
+            lower, upper = pending.pop()
+            page, limit = await self._v3_range_page(lower, upper)
+            dates = _range_dates(page, limit, lower, upper)
+            if len(page) < limit:
+                for row, date in zip(page, dates, strict=True):
+                    _merge_snapshot(snapshot, row, date, v3=True)
+            elif upper - lower == 1:
+                await self._merge_v3_cohort(lower, snapshot, pages)
+            else:
+                # A live SEARCH response can be out of measurement order.
+                # Its truncated prefix cannot establish any date boundary.
+                middle = lower + (upper - lower) // 2
+                pending.extend(((middle, upper), (lower, middle)))
+
+        return sorted(snapshot.values(), key=lambda row: (row["date"], row["id"]))
+
     async def read_range(self, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
         """Read a complete half-open raw snapshot or report a typed failure."""
-        v3 = self.uses_v3
+        if start_ms >= end_ms:
+            return []
+        if self.uses_v3:
+            return await self._read_v3_range(start_ms, end_ms)
+
         snapshot: dict[str, dict[str, Any]] = {}
-        start, end = start_ms, end_ms
-        skip = 0
+        end = end_ms
         tie: int | None = None
-        seen_tie_ids: set[str] = set()
         for _ in range(_MAX_RANGE_PAGES):
-            if start >= end:
+            if start_ms >= end:
                 return sorted(snapshot.values(), key=lambda row: (row["date"], row["id"]))
 
-            lower, upper = (start, end) if tie is None else (tie, tie + 1)
-            if v3:
-                page, limit = await self._v3_range_page(lower, upper, skip=skip)
-            else:
-                limit = _V1_PAGE_SIZE if tie is None else _V1_TIE_LIMIT
-                page = await self._v1_range_page(lower, upper, limit)
+            lower, upper = (start_ms, end) if tie is None else (tie, tie + 1)
+            limit = _V1_PAGE_SIZE if tie is None else _V1_TIE_LIMIT
+            page = await self._v1_range_page(lower, upper, limit)
+            dates = _range_dates(page, limit, lower, upper)
+            if any(left < right for left, right in zip(dates, dates[1:])):
+                raise NightscoutConnectionError("Unordered Nightscout SGV range page")
 
-            if not isinstance(page, list) or len(page) > limit:
-                raise NightscoutConnectionError("Invalid Nightscout SGV range page")
-            dates = []
-            for row in page:
-                if not isinstance(row, dict) or not _text(row.get("type")):
-                    raise NightscoutConnectionError("Unexpected Nightscout SGV range entry")
-                date = row.get("date")
-                if type(date) not in (int, float) or not lower <= date < upper:
-                    raise NightscoutConnectionError("Invalid or out-of-range Nightscout SGV date")
-                if row["type"] == "sgv":
-                    _identity(row)
-                bucket = math.floor(date)
-                if dates and (bucket < dates[-1] if v3 else bucket > dates[-1]):
-                    raise NightscoutConnectionError("Unordered Nightscout SGV range page")
-                dates.append(bucket)
-
-            full = len(page) == limit
             if tie is not None:
-                # Only a single measurement millisecond needs SEARCH offset
-                # paging. Outside that cohort use date bounds so concurrent
-                # changes to earlier dates can't shift later pages.
-                ids = {_identity(row) for row in page if row["type"] == "sgv"}
-                if not v3 and full:
+                if len(page) == limit:
                     raise NightscoutConnectionError("Saturated legacy Nightscout SGV timestamp")
-                if ids and not ids.difference(seen_tie_ids):
-                    raise NightscoutConnectionError("Non-progressing Nightscout SGV range page")
-                seen_tie_ids.update(ids)
                 for row, date in zip(page, dates, strict=True):
-                    _merge_snapshot(snapshot, row, date, v3=v3)
-                if full:
-                    skip += limit
-                else:
-                    if v3:
-                        start = tie + 1
-                    else:
-                        end = tie
-                    skip, tie = 0, None
-                    seen_tie_ids.clear()
+                    _merge_snapshot(snapshot, row, date, v3=False)
+                end, tie = tie, None
                 continue
 
-            if not full:
+            if len(page) < limit:
                 for row, date in zip(page, dates, strict=True):
-                    _merge_snapshot(snapshot, row, date, v3=v3)
+                    _merge_snapshot(snapshot, row, date, v3=False)
                 return sorted(snapshot.values(), key=lambda row: (row["date"], row["id"]))
 
             boundary = dates[-1]
             for row, date in zip(page, dates, strict=True):
                 if date != boundary:
-                    _merge_snapshot(snapshot, row, date, v3=v3)
-            # Keep the last timestamp in the next request. If that inclusive
-            # stamp alone filled this page, fetch the complete isolated cohort.
-            if v3 and boundary > start:
-                start = boundary
-            elif not v3 and boundary < end - 1:
+                    _merge_snapshot(snapshot, row, date, v3=False)
+            if boundary < end - 1:
                 end = boundary + 1
             else:
                 tie = boundary
