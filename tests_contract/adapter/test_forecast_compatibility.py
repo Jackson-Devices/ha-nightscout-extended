@@ -1,5 +1,7 @@
 """Observe the released integration's AR2 entities through real HA setup and polling."""
 
+from datetime import datetime, timedelta
+
 from aiohttp import web
 from homeassistant import config_entries
 from homeassistant.const import CONF_URL, STATE_UNKNOWN
@@ -18,6 +20,12 @@ PROBE = "/api/v2/properties/bgnow"
 PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal"
 TREATMENTS = "/api/v1/treatments.json"
 DEVICESTATUS = "/api/v1/devicestatus/"
+POLL_TIME = "2026-01-08T12:15:00Z"
+AGE_EVENT_TYPES = ("Insulin Change", "Site Change", "Sensor Start", "Sensor Change", "Pump Battery Change")
+AGE_FIELDS = tuple(f"find[eventType][$in][{index}]" for index in range(len(AGE_EVENT_TYPES)))
+START = "find[created_at][$gte]"
+END = "find[created_at][$lte]"
+QUERY_KEYS = {"count", START, END, *AGE_FIELDS}
 
 
 @pytest.fixture
@@ -34,7 +42,18 @@ async def forecast_site(socket_enabled):
     ]
 
     async def read(request):
-        data["requests"].append(request.path)
+        query = {key: request.query[key] for key in request.query if key in QUERY_KEYS}
+        anonymous_get = (
+            request.method == "GET"
+            and not request.can_read_body
+            and len(query) == len(request.query)
+            and not any(
+                key in request.headers for key in ("Authorization", "api-secret", "Cookie", "Proxy-Authorization")
+            )
+        )
+        # Unrecognized query parameters and credentials are recorded only by
+        # the failed predicate, never by their values.
+        data["requests"].append((request.path, query, anonymous_get))
         if request.path == STATUS:
             return web.json_response({"version": "15.0.9", "settings": {"units": "mg/dl"}})
         if request.path == TREATMENTS:
@@ -91,20 +110,45 @@ async def _refresh(hass, entry, data):
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert entry.runtime_data.last_update_success
-    assert data["requests"] == [PROPERTIES, TREATMENTS]
+    now = datetime.fromisoformat(POLL_TIME)
+
+    def utc_ms(value):
+        return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    treatment_poll = {
+        START: utc_ms(now - timedelta(hours=48)), END: utc_ms(now + timedelta(days=62)), "count": "1000",
+    }
+    age_poll = {
+        **dict(zip(AGE_FIELDS, AGE_EVENT_TYPES, strict=True)),
+        START: "0001-01-01T00:00:00.000Z",
+        END: utc_ms(now),
+        "count": "100",
+    }
+    device_poll = {
+        START: utc_ms(now - timedelta(hours=1)), END: utc_ms(now + timedelta(minutes=1)), "count": "1000",
+    }
+
+    # Calculated values, current treatments and age history are fetched
+    # together. The device-status read follows the completed primary polls.
+    *primary, device = data["requests"]
+    assert device == (DEVICESTATUS, device_poll, True)
+    assert [call for call in primary if AGE_FIELDS[0] not in call[1]] == [
+        (PROPERTIES, {}, True), (TREATMENTS, treatment_poll, True),
+    ]
+    assert [call for call in primary if AGE_FIELDS[0] in call[1]] == [(TREATMENTS, age_poll, True)]
 
 
 async def test_native_ar2_forecasts_follow_coordinator_refreshes(
     hass, enable_custom_integrations, forecast_site, freezer,
 ):
     """The frozen native-offset, single-horizon and shifted-clock outcomes occur in HA."""
-    freezer.move_to("2026-01-08T12:15:00Z")
+    freezer.move_to(POLL_TIME)
     url, data = forecast_site
     data["points"] = [(1767874502000, 207), (1767875402000, 231)]
     entry = await _setup(hass, url)
     try:
-        assert data["requests"][:2] == [STATUS, PROBE]
-        assert PROPERTIES in data["requests"] and TREATMENTS in data["requests"]
+        assert data["requests"][:2] == [(STATUS, {}, True), (PROBE, {}, True)]
+        assert {PROPERTIES, TREATMENTS} <= {path for path, _, _ in data["requests"]}
         first, second = _forecasts(hass, entry)
         assert (first.state, second.state) == ("207", "231")
         assert first.attributes["unit_of_measurement"] == second.attributes["unit_of_measurement"] == "mg/dL"
