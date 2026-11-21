@@ -10,6 +10,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import json
+import math
 from pathlib import Path
 from urllib.parse import quote, quote_plus
 
@@ -574,11 +575,12 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
                     f"{role} must report {quantity} mg/dL from the original v2 curve")
     elif case_id.startswith("T-"):
         insulin, carbs = actual["latest_bolus"], actual["latest_carbs"]
-        require(insulin is not None and insulin[3] == "available", "the latest insulin observation remains available")
         require(carbs is not None and carbs[:2] == [36, "g"], "the latest completed carbs remain 36 g")
-        if case_id == "T-LEGACY":
-            require(insulin is not None and insulin[:2] == [7.25, "U"],
-                    "legacy numeric-string insulin behavior remains compatible")
+        legacy_intake = _legacy_numeric_string_intake(case_id, index)
+        if legacy_intake is not None:
+            compare(legacy_intake, insulin, "legacy latest nonzero insulin with a numeric-string input")
+        else:
+            sensor("latest_bolus")
         calendar_calls = [call for call in wire if call["consumer"] == "calendar"]
         scan = [call for call in calendar_calls if call.get("range_field") == "date" and call["status"] == 200]
         event = actual["calendar"]
@@ -588,12 +590,31 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
             has_future = any(row[1] == start and row[6] == end for row in rows)
             require(has_future is (index in {1, 2, 3, 6}),
                     "calendar returns the long event only when it overlaps the requested interval")
+            if index == 2:
+                params = PREPARED[case_id][index - 1][1]["parameters"]["calendar"]
+                duration = DATA["records"]["future-carbs"]["duration"]
+                lower = _timestamp(params["start"]) - timedelta(minutes=duration)
+                require(
+                    scan and scan[0]["skip"] == 0
+                    and _timestamp(scan[0]["lower"]) == lower
+                    and _timestamp(scan[0]["upper"]) == _timestamp(params["end"])
+                    and sum(item["returned"] for item in scan) == 1
+                    and scan[-1]["returned"] < scan[-1]["limit"]
+                    and all(
+                        item["status"] == 200 or (
+                            item["status"] == 400 and item["fixture"] == "companion:configured-page-cap"
+                        )
+                        for item in calendar_calls
+                    )
+                    and all(item.get("skip", 0) < 2 for item in scan),
+                    "narrow date scan completes one stored row before the scripted offset-2 fault",
+                )
         else:
             starts = {row[1] for row in rows}
             require({"2026-01-08T11:00:00Z", "2026-01-08T11:40:00Z"} <= starts,
                     "range includes both original lower and middle treatments")
-            require(("2026-01-08T11:50:00Z" in starts) is (index < 3),
-                    "the deleted bolus no longer appears")
+            require(sum(row[1] == "2026-01-08T11:50:00Z" for row in rows) == (1 if index < 3 else 0),
+                    "the calendar displays the stable bolus once until deletion")
             if case_id == "T-V3-PAGED":
                 require(len(scan) >= 3 and scan[-1]["returned"] < scan[-1]["limit"],
                         "a capped calendar scan reads multiple actual pages and reaches a short terminal page")
@@ -629,6 +650,49 @@ def _calendar_entity_projection(observation):
         default_end = (_timestamp(start) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
         rows.append([None, start, title, None, None, notes, end or default_end])
     return [rows, *observation[1:]]
+
+
+def _legacy_numeric_string_intake(case_id, step):
+    """Project the original finite numeric-string sentinel only for an actual V1 poll."""
+    scope = CASES[case_id]["steps"][step - 1]["wire"]
+    legacy = next((payload for route, _, payload in scope if route == "treatments1"), None)
+    if legacy is None:
+        return None
+    input_id = "invalid-amount"
+    if input_id not in DATA["lists"][legacy]:
+        raise ValueError("the selected legacy treatment phase lost its original numeric-string input")
+    row = DATA["records"][input_id]
+    amount = row["insulin"]
+    if not isinstance(amount, str):
+        raise ValueError("legacy treatment sentinel is no longer a JSON string")
+    numeric = float(amount)
+    if not math.isfinite(numeric) or not numeric:
+        raise ValueError("legacy treatment sentinel is no longer finite and nonzero")
+    return [numeric, "U", row["at"], "available", {}]
+
+
+def _narrow_completed_calendar():
+    """Derive the one overlapping event supplied before the unrequested fault."""
+    case_id = "T-FUTURE-OVERLAP"
+    narrow_step = CASES[case_id]["steps"][1]
+    _, request, _, _, _, _, _ = PREPARED[case_id][1]
+    parameters = request["parameters"]["calendar"]
+    source = next(payload for route, _, payload in narrow_step["wire"] if route == "calendar3-0")
+    records = list(dict.fromkeys(DATA["lists"][source]))
+    if records != ["future-carbs"]:
+        raise ValueError("narrow calendar no longer has the single original storage record")
+    row = DATA["records"][records[0]]
+    start = _timestamp(row["at"])
+    duration = row["duration"]
+    if type(duration) not in (int, float):
+        raise ValueError("narrow calendar's supplied duration is not a JSON number")
+    end = start + timedelta(minutes=duration)
+    if not (start < _timestamp(parameters["end"]) and end > _timestamp(parameters["start"])):
+        raise ValueError("narrow calendar's original event does not overlap")
+    dates = start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")
+    event = [records[0], dates[0], row["eventType"], row.get("insulin"),
+             row.get("carbs"), row.get("notes"), dates[1]]
+    return _calendar_entity_projection([[event], None, None, "available", {}])
 
 
 def _compatible_expectation(case_id, step, frozen_expected):
@@ -682,12 +746,15 @@ def _compatible_expectation(case_id, step, frozen_expected):
         for field in ("latest_bolus", "latest_carbs"):
             reading = frozen_expected[field]
             replace(field, reading[:4] + [{}], "released HA treatment sensors do not expose a source ID")
-        if case_id == "T-LEGACY":
-            reading = DATA["records"]["invalid-amount"]
-            replace("latest_bolus", [float(reading["insulin"]), "U", reading["at"], "available", {}],
-                    "legacy continues to accept the original numeric-string amount")
-        replace("calendar", _calendar_entity_projection(frozen_expected["calendar"]),
-                "HA service omits raw IDs/amounts; released calendar materializes durationless events")
+        legacy_intake = _legacy_numeric_string_intake(case_id, step)
+        if legacy_intake is not None:
+            replace("latest_bolus", legacy_intake, "V1 still accepts the original finite numeric-string amount")
+        if case_id == "T-FUTURE-OVERLAP" and step == 2:
+            replace("calendar", _narrow_completed_calendar(),
+                    "the actual date scan exhausts one stored row before the scripted offset-2 fault")
+        else:
+            replace("calendar", _calendar_entity_projection(frozen_expected["calendar"]),
+                    "HA service omits raw IDs/amounts and gives durationless events their released length")
     return compatible, reasons
 
 
