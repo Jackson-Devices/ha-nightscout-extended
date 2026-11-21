@@ -96,6 +96,9 @@
       },
       "insulin_age": {
         "name": "Insulin age"
+      },
+      "pump_battery_age": {
+        "name": "Pump battery age"
       }
     },
     "calendar": {

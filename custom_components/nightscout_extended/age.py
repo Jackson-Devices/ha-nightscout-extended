@@ -28,6 +28,7 @@ class AgeSignal:
 
 AGE_SIGNALS = (
     AgeSignal("insulin_age", ("Insulin Change",)),
+    AgeSignal("pump_battery_age", ("Pump Battery Change",)),
 )
 
 AGE_EVENT_TYPES = tuple(dict.fromkeys(kind for signal in AGE_SIGNALS for kind in signal.event_types))
