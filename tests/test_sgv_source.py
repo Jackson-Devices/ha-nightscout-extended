@@ -49,6 +49,7 @@ class _Client:
         self.fence = {"srvDate": BASE, "collections": {"entries": BASE + 999_000}}
         self.calls = []
         self.fail_history_after = None
+        self.shift_range_tie = False
 
     async def _protected_v3(self, path, query):
         self.calls.append((path, query))
@@ -58,12 +59,18 @@ class _Client:
         if path == "/api/v3/entries":
             if limit > self.cap:
                 raise api._V3PageLimitError("limit", status=400)
-            assert query["type"] == "sgv" and query["sort"] == "date"
+            assert query["type"] == "sgv" and query["sort"] in {"date", "_id"}
             lower, upper, skip = (int(query[key]) for key in ("date$gte", "date$lt", "skip"))
-            matches = sorted(
-                (row for row in self.snapshot if lower <= row["date"] < upper),
-                key=lambda row: (row["date"], row.get("identifier", row.get("_id"))),
-            )
+            matches = [row for row in self.snapshot if lower <= row["date"] < upper]
+            if query["sort"] == "_id":
+                assert upper - lower == 1
+                matches.sort(key=lambda row: row.get("_id", row.get("identifier")))
+                if skip and self.shift_range_tie:
+                    matches.pop(0)
+            else:
+                assert skip == 0
+                # A protected 15.0.6 SEARCH may deliver date inversions.
+                # Preserve the native fixture order, including before LIMIT.
             return _result(matches[skip:skip + limit])
         assert path.startswith("/api/v3/entries/history/")
         assert set(query) == {"limit"}
@@ -170,17 +177,17 @@ def test_v3_history_saturated_clock_requires_authoritative_reconciliation(monkey
     assert len(client.calls) == 2
 
 
-def test_v3_range_is_half_open_and_paginates_one_dense_timestamp(monkeypatch):
+def test_v3_range_splits_an_unordered_full_prefix_and_reads_dense_ties(monkeypatch):
     monkeypatch.setattr(wire, "_V3_PAGE_SIZE", 6)
     client = _Client()
     client.cap = 2
     client.snapshot = [
         _entry("outside-low", BASE - 1),
-        {"_id": "legacy", "date": BASE, "type": "sgv", "sgv": 95, "srvModified": BASE},
-        _entry("a", BASE + 10, "5.5", units="mmol/L", direction="Flat"),
-        _entry("b", BASE + 10, 113, srvModified=BASE + 50),
-        _entry("c", BASE + 10, 116),
         _entry("last", BASE + 20),
+        _entry("b", BASE + 10, 113, srvModified=BASE + 50, _id="mongo-a"),
+        {"_id": "legacy", "date": BASE, "type": "sgv", "sgv": 95, "srvModified": BASE},
+        _entry("a", BASE + 10, "5.5", units="mmol/L", direction="Flat", _id="mongo-b"),
+        _entry("c", BASE + 10, 116, _id="mongo-c"),
         _entry("outside-high", BASE + 21),
     ]
     source = wire.NightscoutSGVSource(client)
@@ -189,8 +196,37 @@ def test_v3_range_is_half_open_and_paginates_one_dense_timestamp(monkeypatch):
     assert readings[0]["date"] == BASE and readings[0]["modified"] is None
     assert readings[1]["sgv"] == pytest.approx(5.5 * 18.0182)
     assert readings[1]["direction"] == "Flat" and readings[2]["modified"] == BASE + 50
-    assert any(query.get("skip") == "1" and query.get("date$lt") == str(BASE + 11)
-               for _, query in client.calls)
+    successful = [query for _, query in client.calls if int(query["limit"]) == client.cap]
+    assert successful[0]["date$lt"] == str(BASE + 21)
+    assert successful[1]["date$lt"] == str(BASE + 10)
+    assert any(
+        query["sort"] == "_id" and query["skip"] == "1"
+        and query["date$gte"] == str(BASE + 10) and query["date$lt"] == str(BASE + 11)
+        for query in successful
+    )
+
+
+def test_v3_range_accepts_an_unordered_short_whole_window():
+    client = _Client()
+    client.snapshot = [_entry("late", BASE + 10), _entry("early", BASE)]
+    source = wire.NightscoutSGVSource(client)
+
+    readings = asyncio.run(source.read_range(BASE, BASE + 11))
+    assert [(row["id"], row["date"]) for row in readings] == [
+        ("early", BASE), ("late", BASE + 10),
+    ]
+    assert len(client.calls) == 1
+
+
+def test_v3_range_refuses_a_shifted_same_timestamp_offset(monkeypatch):
+    monkeypatch.setattr(wire, "_V3_PAGE_SIZE", 2)
+    client = _Client()
+    client.snapshot = [_entry(key, BASE) for key in ("first", "middle", "third")]
+    client.shift_range_tie = True
+    source = wire.NightscoutSGVSource(client)
+
+    with pytest.raises(api.NightscoutConnectionError, match="Unstable.*timestamp"):
+        asyncio.run(source.read_range(BASE, BASE + 1))
 
 
 def test_legacy_reads_old_exact_window_and_expands_timestamp_cohort(monkeypatch):
