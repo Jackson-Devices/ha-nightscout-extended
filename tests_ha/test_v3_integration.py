@@ -7,7 +7,7 @@ from time import time
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.const import CONF_API_KEY, CONF_URL, STATE_UNKNOWN
+from homeassistant.const import CONF_API_KEY, CONF_URL, EVENT_HOMEASSISTANT_FINAL_WRITE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -154,6 +154,13 @@ def _entity_ids(hass, entry):
     }
 
 
+def _device_id(hass, entry):
+    devices = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+    assert len(devices) == 1
+    assert devices[0].identifiers == {(DOMAIN, URL)}
+    return devices[0].id
+
+
 def _assert_wire_mode(mocker, *, v3, token=None, secret=None, discovery=False):
     calls = mocker.mock_calls
     paths = {url.path for _, url, _, _ in calls}
@@ -268,9 +275,7 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
                 ("forecast_30", "forecast_in_30_minutes"),
             )
         } | {f"{URL}_treatments": CALENDAR}
-        devices = dr.async_get(hass)
-        device = devices.async_get_device({(DOMAIN, URL)})
-        assert device is not None
+        device_id = _device_id(hass, entry)
 
         _mock_site(aioclient_mock, v3=True)
         assert await hass.config_entries.async_reload(entry.entry_id)
@@ -289,13 +294,17 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
             assert headers["authorization"] == f"Bearer {BEARER}"
             assert "api-secret" not in headers and "token" not in url.query
         assert _entity_ids(hass, entry) == ids
-        assert devices.async_get_device({(DOMAIN, URL)}).id == device.id
+        assert _device_id(hass, entry) == device_id
 
         aioclient_mock.mock_calls.clear()
         await _refresh(hass, entry)
         _assert_wire_mode(aioclient_mock, v3=True, token=TOKEN)
     finally:
         assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        # Flush writes scheduled by the reload before the HA fixture shuts down.
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+        await hass.async_block_till_done()
 
 
 async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
