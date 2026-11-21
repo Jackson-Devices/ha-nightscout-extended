@@ -6,7 +6,7 @@ import importlib.util
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -344,6 +344,86 @@ def test_v3_glucose_in_mmol_rows_normalizes_to_native_mgdl_and_keeps_matching_de
     _, result = asyncio.run(_v3_server(fixture.handle, _configured_data))
     assert result.glucose == pytest.approx(155)
     assert result.delta == 6 and result.direction == "FortyFiveUp"
+
+
+_SGV_CLOCK = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+
+
+def _clocked_sgv_poll(monkeypatch, bgnow_offset_ms, measurements):
+    """Keep the HA clock fixed while the synthetic server independently publishes bgnow."""
+    class LocalClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _SGV_CLOCK.astimezone(tz) if tz else _SGV_CLOCK.replace(tzinfo=None)
+
+    monkeypatch.setattr(api, "datetime", LocalClock)
+    origin_ms = int(_SGV_CLOCK.timestamp() * 1000)
+    bgnow_ms = origin_ms + bgnow_offset_ms
+    props = {
+        **PROPS,
+        "bgnow": {"mills": bgnow_ms, "last": 155},
+        "ar2": {"forecast": {"predicted": [
+            {"mills": bgnow_ms + 902_000, "mgdl": 169},
+            {"mills": bgnow_ms + 1_802_000, "mgdl": 175},
+        ]}},
+    }
+    rows = [
+        {"type": "sgv", "date": origin_ms + offset, "sgv": value, "direction": direction}
+        for offset, value, direction in measurements
+    ]
+    cutoffs = []
+    fixture = _V3Fixture()
+
+    async def handle(request):
+        if request.path == _V3_ENTRIES:
+            cutoff = datetime.fromisoformat(request.query["date$lte"])
+            cutoffs.append(cutoff)
+            upper = round(cutoff.timestamp() * 1000)
+            fixture.entry_rows = sorted(
+                (row for row in rows if row["date"] <= upper), key=lambda row: row["date"], reverse=True,
+            )
+        if request.path.startswith("/api/v2/properties/"):
+            return web.json_response(props)
+        return await fixture.handle(request)
+
+    _, data = asyncio.run(_v3_server(handle, _configured_data))
+    return cutoffs, data
+
+
+@pytest.mark.parametrize(
+    ("offset_ms", "accepted"),
+    [(-2_000, True), (0, True), (2_000, True), (59_999, True), (60_000, False)],
+)
+def test_v3_corroborated_sgv_just_ahead_of_local_clock(monkeypatch, offset_ms, accepted):
+    cutoffs, data = _clocked_sgv_poll(monkeypatch, offset_ms, [(offset_ms, 155, "SingleDown")])
+    measured = _SGV_CLOCK + timedelta(milliseconds=offset_ms)
+    expected_cutoff = max(_SGV_CLOCK, measured) if accepted else _SGV_CLOCK
+    assert cutoffs == [expected_cutoff]
+    assert data.glucose_time == (measured if accepted else None)
+    assert data.glucose == (155 if accepted else None)
+    assert data.delta == (6 if accepted else None)
+    assert data.direction == ("FortyFiveUp" if accepted else None)
+    assert data.forecast_at(15).mgdl == 169
+    assert data.forecast_at(30).mgdl == 175
+
+
+@pytest.mark.parametrize("measurement", [(1_999, 155, "SingleDown"), (2_000, 155.01, "SingleDown")])
+def test_v3_unmatched_future_sgv_stays_unknown_inside_widened_query(monkeypatch, measurement):
+    cutoffs, data = _clocked_sgv_poll(monkeypatch, 2_000, [measurement])
+    assert cutoffs == [_SGV_CLOCK + timedelta(seconds=2)]
+    assert data.glucose is None and data.glucose_time is None
+    assert data.delta is None and data.direction is None
+
+
+def test_v3_distinct_nearby_past_sgv_keeps_its_timestamp_and_no_other_delta(monkeypatch):
+    cutoffs, data = _clocked_sgv_poll(
+        monkeypatch, -2_000, [(-2_000, 155, "FortyFiveUp"), (-1_999, 155, "SingleDown")],
+    )
+    assert cutoffs == [_SGV_CLOCK]
+    assert data.glucose == 155
+    assert data.glucose_time == _SGV_CLOCK - timedelta(milliseconds=1_999)
+    assert data.direction == "SingleDown"
+    assert data.delta is None
 
 
 @pytest.mark.parametrize("missing_horizon,remaining,expected", [(15, 30, 175), (30, 15, 169)])

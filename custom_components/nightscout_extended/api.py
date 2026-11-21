@@ -28,6 +28,7 @@ _V3_ENTRIES = "/api/v3/entries"
 _V3_TREATMENTS = "/api/v3/treatments"
 _V3_PAGE_SIZE = 100
 _V3_MAX_PAGES = 100
+_V3_SGV_CLOCK_SKEW = timedelta(seconds=60)
 
 
 class NightscoutAuthError(Exception):
@@ -467,9 +468,17 @@ class NightscoutClient:
         raise NightscoutConnectionError(f"Collection paging bound exceeded for {path}")
 
     async def _v3_glucose(
-        self, now: datetime,
+        self, now: datetime, bgnow_time: datetime | None, bgnow_glucose: float | None,
     ) -> tuple[datetime, float, str | None] | None:
-        query = {"type": "sgv", "date$lte": _v3_iso(now), "sort$desc": "date"}
+        # Nightscout has already checked bgnow against its own clock. Allow HA's
+        # clock to trail it slightly, and corroborate the exact reading below.
+        future_bgnow = None
+        if (
+            bgnow_time is not None and bgnow_glucose is not None
+            and timedelta(0) < bgnow_time - now < _V3_SGV_CLOCK_SKEW
+        ):
+            future_bgnow = bgnow_time
+        query = {"type": "sgv", "date$lte": _v3_iso(future_bgnow or now), "sort$desc": "date"}
         async for page in self._v3_pages(_V3_ENTRIES, query, _V3_PAGE_SIZE):
             candidates = []
             for row in page:
@@ -477,11 +486,13 @@ class NightscoutClient:
                     continue
                 when = _ms_to_dt(row.get("date")) or _parse_iso(row.get("dateString"))
                 value = _num(row.get("sgv"))
-                if when is None or when > now or value is None:
+                if when is None or value is None:
                     continue
                 units = row.get("units")
                 if isinstance(units, str) and units.lower() in ("mmol", "mmol/l"):
                     value /= MMOL_PER_MGDL
+                if when > now and (when != future_bgnow or value != bgnow_glucose):
+                    continue
                 # Nightscout's bgnow excludes CGM error and sentinel readings.
                 if math.isfinite(value) and value > 39:
                     direction = row.get("direction")
@@ -587,7 +598,7 @@ class NightscoutClient:
         data = parse_properties(props)
         now = datetime.now(timezone.utc)
         if self._use_v3:
-            _apply_v3_glucose(data, await self._v3_glucose(now))
+            _apply_v3_glucose(data, await self._v3_glucose(now, data.glucose_time, data.glucose))
         data.treatments = await self.async_get_treatments(now - past, now + ahead)
         return data
 
