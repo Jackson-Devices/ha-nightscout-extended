@@ -7,7 +7,7 @@ from time import time
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.const import CONF_API_KEY, CONF_URL, STATE_UNKNOWN
+from homeassistant.const import CONF_API_KEY, CONF_URL, EVENT_HOMEASSISTANT_FINAL_WRITE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -301,6 +301,10 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
         _assert_wire_mode(aioclient_mock, v3=True, token=TOKEN)
     finally:
         assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        # Flush writes scheduled by the reload before the HA fixture shuts down.
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+        await hass.async_block_till_done()
 
 
 async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
