@@ -27,6 +27,9 @@ def _mock(aioclient_mock: AiohttpClientMocker, status=STATUS, ok=True):
     aioclient_mock.get(
         f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS if ok else {}, status=code
     )
+    aioclient_mock.get(
+        f"{URL}/api/v1/treatments.json", params={"sort[duration]": "desc"}, json=[], status=code,
+    )
     aioclient_mock.get(f"{URL}/api/v1/treatments.json", json=TREATMENTS if ok else [], status=code)
 
 

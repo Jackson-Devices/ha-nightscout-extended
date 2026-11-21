@@ -21,6 +21,8 @@ from yarl import URL
 MMOL_PER_MGDL = 1 / 18.0182
 
 PROPERTIES = "bgnow,delta,direction,iob,cob,ar2,basal"
+_V1_TREATMENTS = "/api/v1/treatments.json"
+_TREATMENT_LIMIT = 1000
 _V3_VERSION = "/api/v3/version"
 _V3_ENTRIES = "/api/v3/entries"
 _V3_TREATMENTS = "/api/v3/treatments"
@@ -488,12 +490,15 @@ class NightscoutClient:
                 return max(candidates, key=lambda sample: sample[0])
         return None
 
-    async def _v3_treatments(self, start: datetime, end: datetime, limit: int) -> list[Treatment]:
+    async def _v3_treatments(
+        self, start: datetime, end: datetime, limit: int, *, include_end_ms: bool = False,
+    ) -> list[Treatment]:
         # The server filters stored values before reading/normalizing them. Older
         # documents can have created_at and no v3 date in storage.
         rows = []
+        end_predicate = "lte" if include_end_ms else "lt"
         for key in ("date", "created_at"):
-            query = {f"{key}$gte": _v3_iso(start), f"{key}$lt": _v3_iso(end), "sort$desc": key}
+            query = {f"{key}$gte": _v3_iso(start), f"{key}${end_predicate}": _v3_iso(end), "sort$desc": key}
             seen = set()
             async for page in self._v3_pages(_V3_TREATMENTS, query, limit):
                 ids = {_treatment_id(row) for row in page}
@@ -505,18 +510,73 @@ class NightscoutClient:
                 rows.extend(page)
         return _merge_v3_treatments(rows, start, end)
 
-    async def async_get_treatments(self, start: datetime, end: datetime, limit: int = 1000) -> list[Treatment]:
+    async def _legacy_treatment_range(self, start: str, end: str, limit: int) -> Any:
+        return await self._get(
+            _V1_TREATMENTS,
+            {"find[created_at][$gte]": start, "find[created_at][$lte]": end, "count": str(limit)},
+        )
+
+    async def async_get_treatments(self, start: datetime, end: datetime, limit: int = _TREATMENT_LIMIT) -> list[Treatment]:
         if self._use_v3:
             return await self._v3_treatments(start, end, limit)
-        items = await self._get(
-            "/api/v1/treatments.json",
-            {
-                "find[created_at][$gte]": _iso(start),
-                "find[created_at][$lte]": _iso(end),
-                "count": str(limit),
-            },
-        )
-        return parse_treatments(items)
+        return parse_treatments(await self._legacy_treatment_range(_iso(start), _iso(end), limit))
+
+    async def _calendar_lookback(self, default_length: timedelta, before: datetime) -> timedelta:
+        threshold = f"{default_length.total_seconds() / 60:g}"
+        if self._use_v3:
+            payload = await self._protected_v3(
+                _V3_TREATMENTS,
+                {"duration$gt": threshold, "sort$desc": "duration", "limit": "1", "skip": "0"},
+            )
+            rows = _v3_result(payload, _V3_TREATMENTS, list)
+        else:
+            rows = await self._get(
+                _V1_TREATMENTS,
+                {
+                    "find[created_at][$lt]": _v3_iso(before),
+                    "find[duration][$gt]": threshold,
+                    "sort[duration]": "desc",
+                    "count": "1",
+                },
+            )
+        if isinstance(rows, list):
+            if not rows:
+                return default_length
+            if len(rows) == 1 and isinstance(rows[0], dict):
+                raw = rows[0].get("duration")
+                duration = _num(raw) if type(raw) in (int, float) else None
+                if duration is not None and duration > float(threshold):
+                    try:
+                        return timedelta(minutes=duration)
+                    except OverflowError:
+                        pass
+        raise NightscoutConnectionError("Invalid maximum treatment duration from Nightscout")
+
+    async def async_get_calendar_treatments(
+        self, start: datetime, end: datetime, default_length: timedelta,
+    ) -> list[Treatment]:
+        """Fetch candidate events, including treatments that began before the displayed range."""
+        start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+        if start >= end:
+            return []
+
+        since_first_time = start - datetime.min.replace(tzinfo=timezone.utc)
+        lookback = min(since_first_time, default_length)
+        if lookback < since_first_time:
+            # The maximum duration gives a safe lower bound for an overlap.
+            lookback = await self._calendar_lookback(default_length, start - lookback)
+        earliest = start - min(since_first_time, lookback)
+
+        if self._use_v3:
+            # Nightscout stores milliseconds. An unaligned upper bound may also
+            # include its floor millisecond; local filtering still uses the exact end.
+            return await self._v3_treatments(
+                earliest, end, _TREATMENT_LIMIT, include_end_ms=bool(end.microsecond % 1000),
+            )
+        rows = await self._legacy_treatment_range(_v3_iso(earliest), _v3_iso(end), _TREATMENT_LIMIT)
+        if not isinstance(rows, list) or len(rows) >= _TREATMENT_LIMIT:
+            raise NightscoutConnectionError("Incomplete legacy Nightscout calendar range")
+        return parse_treatments(rows)
 
     async def async_get_data(
         self, past: timedelta = timedelta(hours=48), ahead: timedelta = timedelta(days=62)

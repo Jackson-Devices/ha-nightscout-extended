@@ -18,12 +18,16 @@ DEFAULT_LENGTH = timedelta(minutes=5)  # treatments are moments; give them a vis
 
 
 def to_event(t: Treatment) -> CalendarEvent:
-    length = timedelta(minutes=t.duration_min) if t.duration_min and t.duration_min > 0 else DEFAULT_LENGTH
+    try:
+        length = timedelta(minutes=t.duration_min) if t.duration_min and t.duration_min > 0 else DEFAULT_LENGTH
+        end = t.time + length
+    except OverflowError:
+        end = datetime.max.replace(tzinfo=t.time.tzinfo)
     description = "\n".join(
         line for line in (t.notes, f"Entered by {t.entered_by}" if t.entered_by else None) if line
     ) or None
     return CalendarEvent(
-        start=t.time, end=t.time + length, summary=t.summary, description=description, uid=t.uid
+        start=t.time, end=end, summary=t.summary, description=description, uid=t.uid
     )
 
 
@@ -60,10 +64,10 @@ class NightscoutTreatmentsCalendar(CoordinatorEntity[NightscoutCoordinator], Cal
     async def async_get_events(
         self, hass: HomeAssistant, start_date: datetime, end_date: datetime
     ) -> list[CalendarEvent]:
-        # A treatment can start up to a few minutes before the range and still overlap it.
-        fetch_start = start_date - DEFAULT_LENGTH
         try:
-            treatments = await self.coordinator.client.async_get_treatments(fetch_start, end_date)
+            treatments = await self.coordinator.client.async_get_calendar_treatments(
+                start_date, end_date, DEFAULT_LENGTH,
+            )
         except NightscoutConnectionError:
             treatments = self.coordinator.data.treatments  # fall back to what the last poll saw
         events = [to_event(t) for t in treatments]
