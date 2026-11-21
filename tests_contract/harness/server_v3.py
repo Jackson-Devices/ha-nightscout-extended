@@ -5,6 +5,7 @@ from http.client import HTTPConnection
 import json
 import logging
 from pathlib import Path
+import re
 import sys
 import time
 from urllib.parse import quote, urlencode, urlsplit
@@ -21,14 +22,14 @@ class QualificationError(Exception):
     """A value-free disposable-server failure."""
 
 
-def request(port, path, *, headers=None, body=None):
+def request(port, path, *, method="GET", headers=None, body=None):
     connection = HTTPConnection("127.0.0.1", port, timeout=5)
     headers = {"Accept": "application/json", **(headers or {})}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(body)
     try:
-        if body is None:
-            connection.request("GET", path, headers=headers)
-        else:
-            connection.request("POST", path, json.dumps(body), {**headers, "Content-Type": "application/json"})
+        connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         if response.status != 200:
             return response.status, None
@@ -59,7 +60,7 @@ def native_subject(port, admin):
     headers = {"api-secret": admin}
     endpoint = f"{AUTH}/subjects"
     await_read(lambda: request(port, endpoint, headers=headers), lambda body: isinstance(body, list), "subject administration")
-    status, _ = request(port, endpoint, headers=headers, body={"name": SUBJECT, "roles": ["readable"]})
+    status, _ = request(port, endpoint, method="POST", headers=headers, body={"name": SUBJECT, "roles": ["readable"]})
     require(status == 200, "subject creation")
     status, subjects = request(port, endpoint, headers=headers)
     require(status == 200 and isinstance(subjects, list), "subject listing")
@@ -72,7 +73,9 @@ def native_subject(port, admin):
     valid_times = isinstance(exchange.get("iat"), int) and isinstance(exchange.get("exp"), int)
     require(isinstance(bearer, str) and bearer and valid_times and 0 < exchange["iat"] < exchange["exp"],
             "bearer response")
-    return access, {"Authorization": f"Bearer {bearer}"}
+    subject_id = subject.get("_id")
+    require(isinstance(subject_id, str) and re.fullmatch("[0-9a-f]{24}", subject_id), "disposable subject ID")
+    return access, {"Authorization": f"Bearer {bearer}"}, subject_id, exchange["exp"]
 
 
 def raw_rows(port, path, query, bearer):
@@ -92,7 +95,7 @@ def prove_server(port, fixture, admin):
         )
 
     await_read(lambda: request(port, "/api/v3/version"), v3_version, "v3 discovery")
-    access, bearer = native_subject(port, admin)
+    access, bearer, subject_id, expires = native_subject(port, admin)
     require(request(port, f"{ENTRIES}?limit=1")[0] in (401, 403), "anonymous entries restriction")
     # Read permission without attempting a write or relying on public default roles.
     denied = f"{AUTH}/debug/check/{quote('api:treatments:create', safe=':')}"
@@ -114,7 +117,24 @@ def prove_server(port, fixture, admin):
         fields = (field, "eventType", "notes", "carbs", "insulin")
         require(any(all(row.get(key) == expected.get(key) for key in fields) for row in rows),
                 f"raw treatment filtered by {field}")
-    return access
+    return access, bearer, subject_id, expires
+
+
+def revoke_and_prove_denial(port, admin, access, bearer, subject_id, expires):
+    # Remove the same subject that passed both collection reads before this check.
+    deleted, _ = request(port, f"{AUTH}/subjects/{subject_id}", method="DELETE", headers={"api-secret": admin})
+    require(deleted == 200, "native subject deletion")
+    exchange, _ = request(port, f"{AUTH}/request/{quote(access, safe='')}")
+    entries, _ = request(port, f"{ENTRIES}?limit=1", headers=bearer)
+    treatments, _ = request(port, f"{TREATMENTS}?limit=1", headers=bearer)
+    unexpired = time.time() < expires
+    print(json.dumps({
+        "revocation": {
+            "deleted_http": deleted, "exchange_http": exchange, "entries_http": entries,
+            "treatments_http": treatments, "cached_bearer_unexpired": unexpired,
+        },
+    }))
+    require(unexpired and (exchange, entries, treatments) == (401, 403, 403), "revoked subject raw denial")
 
 
 async def prove_client(url, fixture, access):
@@ -173,6 +193,30 @@ async def prove_client(url, fixture, access):
     return required <= observed and all(result[key] for key in ("bearer_only", "glucose", "time", "treatments"))
 
 
+async def prove_revoked_client(url, access):
+    from aiohttp import ClientSession, ClientTimeout
+    from custom_components.nightscout_extended.api import NightscoutAuthError, NightscoutClient
+
+    outcomes = {}
+    async with ClientSession(timeout=ClientTimeout(total=15)) as session:
+        # Fresh instances make each check independent of in-memory v3/auth mode state.
+        for read in ("data", "status"):
+            client = NightscoutClient(session, url, access)
+            try:
+                if read == "data":
+                    await client.async_get_data()
+                else:
+                    await client.async_get_status()
+            except NightscoutAuthError as exc:
+                outcomes[read] = exc.status
+            except Exception as exc:
+                outcomes[read] = type(exc).__name__
+            else:
+                outcomes[read] = "unexpected_success"
+    print(json.dumps({"revoked_client": outcomes}))
+    return outcomes == {"data": 401, "status": 401}
+
+
 def main(url, fixture_json):
     logging.disable(logging.CRITICAL)
     parsed = urlsplit(url)
@@ -182,7 +226,7 @@ def main(url, fixture_json):
     fixture = json.loads(fixture_json)
     admin = sys.stdin.readline().strip()
     try:
-        access = prove_server(parsed.port, fixture, admin)
+        access, bearer, subject_id, expires = prove_server(parsed.port, fixture, admin)
     except QualificationError as exc:
         print(f"v3 raw-server qualification failed: {exc}")
         return 2
@@ -191,13 +235,23 @@ def main(url, fixture_json):
         return 2
     print("v3 raw entries and treatments, subject exchange, and read-only authorization passed")
     try:
-        return 0 if asyncio.run(prove_client(url, fixture, access)) else 1
+        if not asyncio.run(prove_client(url, fixture, access)):
+            return 1
     except ImportError:
         print("v3 client environment is incomplete")
         return 2
     except Exception as exc:
         print(f"v3 client read failed ({type(exc).__name__})")
         return 1
+    try:
+        revoke_and_prove_denial(parsed.port, admin, access, bearer, subject_id, expires)
+    except QualificationError as exc:
+        print(f"v3 raw-server qualification failed: {exc}")
+        return 2
+    except Exception as exc:
+        print(f"v3 raw-server qualification failed ({type(exc).__name__})")
+        return 2
+    return 0 if asyncio.run(prove_revoked_client(url, access)) else 1
 
 
 if __name__ == "__main__":
