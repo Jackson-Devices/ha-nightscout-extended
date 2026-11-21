@@ -8,7 +8,7 @@
  * at night, and draws recent readings plus the AR2 forecast behind the number.
  */
 
-export const CARD_VERSION = "0.3.1";
+export const CARD_VERSION = "0.3.2";
 const PLATFORM = "nightscout_extended";
 const MGDL_PER_MMOL = 18.0182;
 const DEFAULT_THRESHOLDS = { urgent_low: 55, low: 80, high: 180, urgent_high: 260 };
@@ -52,6 +52,7 @@ const DEFAULT_CONFIG = {
   show_footer: true,
   show_clock: true,
   fill_screen: false,
+  text_size: 100,
 };
 
 const CHART_LO = 40;   // mg/dL at the bottom of the chart
@@ -126,6 +127,7 @@ class NightscoutGlucoseCard extends HTMLElement {
         { name: "name", selector: { text: {} } },
         { name: "fill_screen", selector: { boolean: {} } },
         { name: "hours_to_show", selector: { number: { min: 1, max: 24, mode: "box" } } },
+        { name: "text_size", selector: { number: { min: 50, max: 300, step: 10, mode: "slider", unit_of_measurement: "%" } } },
         {
           name: "",
           type: "grid",
@@ -144,6 +146,7 @@ class NightscoutGlucoseCard extends HTMLElement {
         name: "Name shown at the top",
         fill_screen: "Fill the screen (for a panel view on a kiosk)",
         hours_to_show: "Hours of history in the chart",
+        text_size: "Size of the clock, age, name and IOB / COB line",
         show_chart: "Chart",
         show_footer: "IOB / COB / forecast line",
         show_clock: "Clock",
@@ -157,11 +160,12 @@ class NightscoutGlucoseCard extends HTMLElement {
   setConfig(config) {
     if (!config || typeof config !== "object") throw new Error("Invalid configuration");
     const cfg = { ...DEFAULT_CONFIG, ...config };
-    for (const key of ["hours_to_show", "night_start", "night_end", "stale_minutes"]) {
+    for (const key of ["hours_to_show", "night_start", "night_end", "stale_minutes", "text_size"]) {
       cfg[key] = Number(cfg[key]);
       if (!Number.isFinite(cfg[key])) throw new Error(`${key} must be a number`);
     }
     cfg.hours_to_show = Math.min(48, Math.max(1, cfg.hours_to_show));
+    cfg.text_size = Math.min(400, Math.max(25, cfg.text_size));
     this._config = cfg;
     this._history = { t: 0, key: null, pts: [], busy: false };
     if (this._root) this._render();
@@ -295,7 +299,7 @@ class NightscoutGlucoseCard extends HTMLElement {
           pointer-events: none; }
         .top, .mid, .bar, .footer { position: relative; z-index: 1; }
         .top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
-          font-size: min(5cqh, 3.2cqw); }
+          font-size: calc(max(12px, min(5cqh, 3.2cqw)) * var(--ngc-text-scale, 1)); }
         .clock, .age { opacity: 0.85; }
         .age { justify-self: end; }
         .name { font-size: 1.6em; font-weight: 500; text-align: center; white-space: nowrap;
@@ -309,7 +313,7 @@ class NightscoutGlucoseCard extends HTMLElement {
         .bar { justify-self: center; width: 70%; height: min(2.4cqh, 14px); margin: 1cqh 0 1.6cqh;
           border-radius: 999px; background: color-mix(in srgb, var(--ngc-fg) 25%, transparent); }
         .fill { height: 100%; border-radius: inherit; background: var(--ngc-fg); transition: width 0.6s ease; }
-        .footer { justify-self: center; font-size: min(4cqh, 2.8cqw); opacity: 0.8; white-space: nowrap; }
+        .footer { justify-self: center; font-size: calc(max(11px, min(4cqh, 2.8cqw)) * var(--ngc-text-scale, 1)); opacity: 0.8; white-space: nowrap; }
         .footer span + span::before { content: "·"; margin: 0 0.9em; }
         .missing { padding: 16px; }
         [hidden] { display: none !important; }
@@ -355,6 +359,7 @@ class NightscoutGlucoseCard extends HTMLElement {
 
     el.wrap.style.setProperty("--ngc-bg", c.bg);
     el.wrap.style.setProperty("--ngc-fg", c.fg);
+    el.wrap.style.setProperty("--ngc-text-scale", String(cfg.text_size / 100));
     this._sizeCard();
 
     el.clock.textContent = cfg.show_clock

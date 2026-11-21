@@ -3,6 +3,12 @@
 Each version's section becomes its GitHub release notes, which Home Assistant shows in the update dialog.
 Add a section here before tagging a release.
 
+## [0.3.2] - 2026-11-21
+
+### Changed
+- **Glucose card**: the clock, reading age, name and IOB/COB line no longer shrink to an unreadable size on a small
+  card. A new `text_size` option (in percent, also in the card editor) makes them bigger or smaller.
+
 ## [0.3.1] - 2026-11-13
 
 ### Fixed

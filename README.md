@@ -95,6 +95,7 @@ It finds the integration's sensors itself; set `entity` if you have more than on
 | `name` | none | Text at the top, e.g. whose readings these are |
 | `fill_screen` | `false` | Fill the screen from the card's top edge down, for a panel view on a kiosk (works with the header hidden) |
 | `hours_to_show` | `3` | Hours of history in the chart (1–48) |
+| `text_size` | `100` | Size of the clock, reading age, name and IOB/COB line, in percent. They grow and shrink with the card and never go below a readable minimum; raise this on a small card |
 | `show_chart`, `show_footer`, `show_clock` | `true` | Turn parts off |
 | `night_mode` | `true` | Dim to coloured text on black at night |
 | `night_start`, `night_end` | `21`, `7` | Night hours (0–23) |
