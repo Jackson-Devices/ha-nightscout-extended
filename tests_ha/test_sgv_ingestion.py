@@ -62,9 +62,10 @@ class _Nightscout:
         self.docs = {}
         self.bgnow = {}
         self.offline = False
-        self.fail_search = False
-        self.fail_history_from = None
-        self.failed_history = 0
+        self.fail_search_through = None
+        self.fail_history_continuation = False
+        self.history_faults = []
+        self._first_full_history_cursor = None
         self.requests = []
         self._stamp = 0
         mocker.get(re.compile(rf"^{re.escape(self.url)}/api/"), side_effect=self._answer)
@@ -137,14 +138,24 @@ class _Nightscout:
             return reply({"srvDate": now, "collections": {"entries": self._stamp or now}}, v3=True)
         if url.path.startswith(HISTORY):
             cursor = int(url.path.removeprefix(HISTORY))
-            if self.fail_history_from is not None and cursor >= self.fail_history_from:
-                self.failed_history += 1
+            if (
+                self.fail_history_continuation
+                and self._first_full_history_cursor is not None
+                and cursor > self._first_full_history_cursor
+            ):
+                self.history_faults.append(url.path)
                 return reply({}, status=503)
             limit = int(url.query.get("limit", 1000))
             rows = (row for row in self.docs.values() if row["srvModified"] > cursor)
-            return reply(sorted(rows, key=lambda row: row["srvModified"])[:limit], v3=True)
+            page = sorted(rows, key=lambda row: row["srvModified"])[:limit]
+            if self.fail_history_continuation and len(page) == limit:
+                self._first_full_history_cursor = cursor
+            return reply(page, v3=True)
         if url.path in {ENTRIES, LEGACY_ENTRIES}:
-            if self.fail_search:
+            if (
+                self.fail_search_through is not None
+                and _query_time(url.query["date$gte"]) <= self.fail_search_through
+            ):
                 return reply({}, status=503)
             return reply(self._search_rows(url), v3=self.v3)
         if url.path in {"/api/v1/treatments.json", "/api/v3/treatments"}:
@@ -200,7 +211,8 @@ def _current(hass, entry, value, when):
     if when == STATE_UNKNOWN:
         assert actual == STATE_UNKNOWN
     else:
-        assert datetime.fromisoformat(actual) == datetime.fromisoformat(when)
+        # HA's timestamp device class serializes its state to whole seconds.
+        assert actual == datetime.fromisoformat(when).isoformat(timespec="seconds")
 
 
 async def _tick(hass, freezer, site):
@@ -304,7 +316,8 @@ async def test_failed_second_history_page_keeps_committed_rows_and_retries_the_b
     entry = await _configure(hass, site)
     try:
         original = [_sample("committed", LATEST, 124)]
-        _assert_rows(await _history(hass, entry), original)
+        committed = await _history(hass, entry)
+        _assert_rows(committed, original)
         # Exceed the pinned server's default maximum page size (1000).
         backlog_start = datetime(2026, 1, 8, 12, 1, tzinfo=UTC)
         first_stamp = dt_util.utcnow()
@@ -317,17 +330,19 @@ async def test_failed_second_history_page_keeps_committed_rows_and_retries_the_b
             site.put(identity, date, 100 + index % 17, modified=modified)
             expected.append(_sample(identity, date, 100 + index % 17))
 
-        site.fail_history_from = _ms(first_stamp)
-        site.fail_search = True
+        # Allow the preceding tail SEARCH. Fail only the HISTORY request
+        # that continues an observed full page.
+        site.fail_history_continuation = True
         await _tick(hass, freezer, site)
-        assert site.failed_history > 0
-        history_requests = [path for path, _ in site.requests if path.startswith(HISTORY)]
-        assert len(set(history_requests)) >= 2
-        _assert_rows(await _history(hass, entry), original)
+        failed_attempt = [path for path, _ in site.requests if path.startswith(HISTORY)]
+        assert len(set(failed_attempt)) >= 2
+        assert site.history_faults and site.history_faults[0] == failed_attempt[1]
+        assert await _history(hass, entry) == committed
 
-        site.fail_history_from = None
-        site.fail_search = False
+        site.fail_history_continuation = False
         await _tick(hass, freezer, site)
+        retry = [path for path, _ in site.requests if path.startswith(HISTORY)]
+        assert retry[:2] == failed_attempt[:2]
         _assert_rows(await _history(hass, entry), [*expected, *original])
         await _tick(hass, freezer, site)
         _assert_rows(await _history(hass, entry), [*expected, *original])
@@ -380,10 +395,20 @@ async def test_retained_history_works_offline_and_older_ranges_are_fetched_on_de
         _assert_rows(await _history(hass, entry, OLDER, OLDER_SAMPLE), [])
 
         site.offline = True
-        _assert_rows(
-            await _history(hass, entry, start=OLDER), [retained],
-            status="partial", missing=[(OLDER, RETENTION_START)],
-        )
+        site.requests.clear()
+        _assert_rows(await _history(hass, entry, start=OLDER), [older, retained])
+        assert site.requests == []
+
+        # Extend the request into an uncached older range without advancing the
+        # clock or triggering another poll. The cached and durable rows remain usable.
+        earlier = "2026-01-01T08:00:00+00:00"
+        partial = await _history(hass, entry, start=earlier)
+        _assert_rows(partial, [older, retained], status="partial", missing=[(earlier, OLDER)])
+        assert partial["as_of"] == committed["as_of"]
+        assert {path for path, _ in site.requests} == {search_path}
+        assert {tuple(_query_time(query[key]) for key in keys) for _, query in site.requests} == {
+            (_ms(earlier), _ms(OLDER))
+        }
     finally:
         await _unload(hass, entry)
 
@@ -402,9 +427,9 @@ async def test_reload_and_home_assistant_restart_restore_committed_rows(
         _assert_rows(await _history(first, entry), expected)
         _current(first, entry, "124", LATEST)
 
-        # Leave setup, v2 properties, and quiet HISTORY online, but make
-        # reacquiring the raw sample through SEARCH impossible.
-        site.fail_search = True
+        # Deny SEARCH that could reacquire the old sample while allowing
+        # SEARCH of the newly uncovered tail and quiet HISTORY.
+        site.fail_search_through = _ms(LATEST)
         assert await first.config_entries.async_reload(entry_id)
         await first.async_block_till_done()
         _assert_rows(await _history(first, entry), expected)
