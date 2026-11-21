@@ -7,7 +7,7 @@ fixture replies the integration reached.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import json
 from pathlib import Path
@@ -16,6 +16,7 @@ from urllib.parse import quote, quote_plus
 from aiohttp import web
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util.unit_conversion import BloodGlucoseConcentrationConverter
 import pytest
 from pytest_socket import socket_allow_hosts
 
@@ -227,7 +228,9 @@ class SupplementalReplay:
     def _treatments(self, wire, request, auth, call):
         query = request.query
         calendar = self.channel == "calendar"
-        if calendar and ("duration$gt" in query or "find[duration][$gt]" in query):
+        if calendar and any(
+            key in query for key in ("duration$gt", "find[duration][$gt]", "find[duration][$type]")
+        ):
             return self._maximum_duration(wire, query, auth, call)
         if wire == "1":
             route = "calendar1" if calendar else "treatments1"
@@ -305,20 +308,26 @@ class SupplementalReplay:
             for record_id in DATA["lists"].get(payload, ())
             if type(records[record_id].get("duration")) in (int, float)
         }
-        raw_min = query.get("duration$gt", query.get("find[duration][$gt]"))
-        minimum = float(raw_min)
         ordered = sorted(candidates, key=lambda key: (-records[key]["duration"], key))
-        selected = [key for key in ordered if records[key]["duration"] > minimum]
         if wire == "3":
             if query.get("sort$desc") != "duration" or query.get("skip") != "0":
                 return 400, {}, 0, b"{}"
+            minimum = float(query["duration$gt"])
+            selected = [key for key in ordered if records[key]["duration"] > minimum]
             limit = int(query["limit"])
         else:
-            if query.get("sort[duration]") not in {"desc", "-1"}:
-                return 400, {}, 0, b"{}"
             limit = int(query["count"])
             before = _timestamp(query.get("find[created_at][$lt]"))
             if before is None:
+                return 400, {}, 0, b"{}"
+            if query.get("find[duration][$type]") == "number":
+                if (query.get("sort[0][0]"), query.get("sort[0][1]")) != ("duration", "desc"):
+                    return 400, {}, 0, b"{}"
+                selected = ordered
+            elif query.get("sort[duration]") in {"desc", "-1"} and "find[duration][$gt]" in query:
+                minimum = float(query["find[duration][$gt]"])
+                selected = [key for key in ordered if records[key]["duration"] > minimum]
+            else:
                 return 400, {}, 0, b"{}"
             selected = [key for key in selected if _timestamp(records[key]["at"]) < before]
         rows = [document(key, records, f"v{wire}") for key in selected[:limit]]
@@ -423,7 +432,7 @@ class SupplementalReplay:
             "auth": self._auth(request),
             "query_keys": sorted({
                 key for key in request.query
-                if key.startswith(("date$", "created_at$", "find["))
+                if key.startswith(("date$", "created_at$", "find[", "sort[0]["))
                 or key in {"limit", "skip", "count", "type", "sort$desc", "sort[duration]", "duration$gt"}
             }),
         }
@@ -556,7 +565,9 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
     elif case_id == "F-AR2-MIXED":
         # The four input snapshots select nearest points within the released
         # three-minute tolerance. Offset/conflicting points remain in the curve.
-        quantities = ((207, 231), (302, 231), (207, 231), (207, 330))[index - 1]
+        # Step 2 has a ±1ms tie. The released chronological order retains
+        # the earlier point, so the +15-minute value is 301, not 302.
+        quantities = ((207, 231), (301, 231), (207, 231), (207, 330))[index - 1]
         for role, quantity in zip(("forecast_15", "forecast_30"), quantities, strict=True):
             value = actual[role]
             require(value is not None and value[:2] == [quantity, "mg/dL"] and value[3] == "available",
@@ -589,14 +600,113 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
     return failures
 
 
-@pytest.mark.parametrize("case_id", REPLAY_CASES)
-async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_path, socket_enabled):
-    """Keep taking observations after an earlier expected semantic difference."""
+def _fields_different(expected, observed):
+    result = {}
+    if expected.keys() != observed.keys():
+        result["<fields>"] = f"expected fields {list(expected)}, got {list(observed)}"
+    for key in sorted(expected.keys() & observed.keys()):
+        try:
+            frozen.compare(expected[key], observed[key], {}, path=f"observation.{key}")
+        except frozen.Mismatch as error:
+            result[key] = str(error)
+    return result
+
+
+def _calendar_entity_projection(observation):
+    """Account for the released five-minute duration and HA service fields."""
+    if observation[3] != "available" or not observation[0]:
+        return observation
+    rows = []
+    for _, start, kind, insulin, carbs, notes, end in observation[0]:
+        amounts = []
+        if carbs:
+            amounts.append(f"{carbs:g} g carbs")
+        if insulin:
+            amounts.append(f"{insulin:g} U insulin")
+        title = f"{kind}: {', '.join(amounts)}" if amounts else kind
+        if not amounts and notes:
+            title = notes.strip().splitlines()[0][:120]
+        default_end = (_timestamp(start) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        rows.append([None, start, title, None, None, notes, end or default_end])
+    return [rows, *observation[1:]]
+
+
+def _compatible_expectation(case_id, step, frozen_expected):
+    """Derive exact public-interface deltas from pinned inputs and stated policy."""
+    compatible = dict(frozen_expected)
+    reasons = {}
+
+    def replace(field, value, reason):
+        if value != frozen_expected[field]:
+            compatible[field] = value
+            reasons[field] = reason
+
+    if case_id == "A-V3-PUBLIC-VERSION":
+        replace("api_version", None, "capability has wire evidence but no public HA sensor")
+    elif case_id == "A-V3-FORBIDDEN" and step == 1:
+        replace("glucose", None, "protected denial prevents entity creation")
+    elif case_id == "A-V3-SUBJECT-FAILURES" and step < 3:
+        replace("glucose", [None, "mg/dL", None, "unknown", {}],
+                "proved permissive legacy fallback publishes no glucose value")
+    elif case_id.startswith("A-V3-"):
+        reading = frozen_expected["glucose"]
+        trend = "FortyFiveUp" if case_id in {"A-V3-RENEW", "A-V3-REVOKED"} and step > 1 else "SingleUp"
+        replace("glucose", reading[:4] + [{"delta": None, "trend": trend}],
+                "v3 reading supplies direction, no agreeing calculated V2 delta was supplied")
+    elif case_id in {"G-PUBLIC-DELTA", "G-V3-DELTA"}:
+        reading = list(frozen_expected["glucose"])
+        if step in {2, 3}:
+            native = 180 if step == 2 else 163
+            converted = BloodGlucoseConcentrationConverter.convert(native, "mg/dL", "mmol/L")
+            reading[0] = {"$near": converted, "absolute": 0.000001}
+        if case_id == "G-PUBLIC-DELTA":
+            deltas = (17, 17, -17, None, 10, None, 0)
+            reading[4] = {"delta": deltas[step - 1], "trend": None}
+        else:
+            reading[4] = {"delta": None, "trend": "SingleDown" if step == 3 else "SingleUp"}
+        replace("glucose", reading, "public HA units and released V2 or V3-agreement delta policy")
+    elif case_id == "D-CALCULATED":
+        for field in ("iob", "cob", "basal"):
+            sense = frozen_expected[field]
+            replace(field, [*sense[:2], None, sense[3], {}],
+                    "the released HA calculated sensor exposes no source timestamp")
+        if step == 4:
+            replace("site_settings", None,
+                    "the public glucose state does not expose settings while wholly unavailable")
+    elif case_id == "F-AR2-MIXED":
+        quantities = ((207, 231), (301, 231), (207, 231), (207, 330))[step - 1]
+        for role, quantity in zip(("forecast_15", "forecast_30"), quantities, strict=True):
+            replace(role, [quantity, "mg/dL", None, "available", {}],
+                    "released nearest point with a chronological tie; HA scalar has no point-time attribute")
+    elif case_id.startswith("T-"):
+        for field in ("latest_bolus", "latest_carbs"):
+            reading = frozen_expected[field]
+            replace(field, reading[:4] + [{}], "released HA treatment sensors do not expose a source ID")
+        if case_id == "T-LEGACY":
+            reading = DATA["records"]["invalid-amount"]
+            replace("latest_bolus", [float(reading["insulin"]), "U", reading["at"], "available", {}],
+                    "legacy continues to accept the original numeric-string amount")
+        replace("calendar", _calendar_entity_projection(frozen_expected["calendar"]),
+                "HA service omits raw IDs/amounts; released calendar materializes durationless events")
+    return compatible, reasons
+
+
+def _release_differences(case_id, step, expected, observed, raw):
+    release, reasons = _compatible_expectation(case_id, step, expected)
+    failures = _fields_different(release, observed)
+    for field in sorted(reasons.keys() - raw.keys()):
+        failures[field] = "an expected public-interface delta from the frozen result was not observed"
+    return failures, reasons
+
+
+async def _run_supplemental(case_id, freezer, hass_storage, tmp_path, *, integrated):
+    """Run the same actual observer for the frozen differential and compatibility."""
     socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
     replay = SupplementalReplay()
     observer = None
     differences = []
     policy_failures = []
+    compatibility_failures = []
     last_units = None
     app = web.Application()
     app.router.add_route("*", "/{path:.*}", replay.handle)
@@ -625,7 +735,17 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
             interface_request = request
             if observer.hass is not None and last_units != replay.units:
                 # The real integration reads display units at setup, not on an
-                # ordinary poll. Use the normal native reload to see the change.
+                # ordinary poll. HA also preserves the existing entity's unit
+                # unless the user changes its sensor preference.
+                glucose = observer._row("glucose")
+                if glucose is None:
+                    raise RuntimeError("cannot configure the display unit without a real glucose entity")
+                display_unit = "mmol/L" if replay.units == "mmol" else "mg/dL"
+                er.async_get(observer.hass).async_update_entity_options(
+                    glucose.entity_id, "sensor",
+                    {**glucose.options.get("sensor", {}), "unit_of_measurement": display_unit},
+                )
+                await observer.hass.async_block_till_done()
                 replay.interface_reload = True
                 interface_request = request | {"lifecycle": "reload"}
             last_units = replay.units
@@ -641,17 +761,14 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
                 actual = await observer.observe(url, request | {"lifecycle": "reload"})
             if replay.errors:
                 raise RuntimeError(f"fixture HTTP handler failed: {replay.errors!r}")
-            mismatches = []
-            if expected.keys() != actual.keys():
-                mismatches.append(f"observation fields expected {list(expected)}, got {list(actual)}")
-            for key in sorted(expected.keys() & actual.keys()):
-                try:
-                    frozen.compare(expected[key], actual[key], {}, path=f"observation.{key}")
-                except frozen.Mismatch as error:
-                    mismatches.append(str(error))
-            differences.extend(f"step {index}: {mismatch}" for mismatch in mismatches)
+            mismatches = _fields_different(expected, actual)
+            differences.extend(f"step {index}: {mismatch}" for mismatch in mismatches.values())
             policy = _product_policy(case_id, index, actual, expected, replay.calls, observer.entry_state)
             policy_failures.extend(f"step {index}: {failure}" for failure in policy)
+            compatibility, declared = {}, {}
+            if integrated:
+                compatibility, declared = _release_differences(case_id, index, expected, actual, mismatches)
+                compatibility_failures.extend(f"step {index}: {failure}" for failure in compatibility.values())
             _render({
                 "kind": "supplemental-ha-replay", "case": case_id, "step": index,
                 "scope": REPLAY_CASES[case_id], "setup_state": observer.entry_state,
@@ -659,6 +776,8 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
                 "observer_reloaded": replay.interface_reload,
                 "differences": mismatches, "wire": replay.calls,
                 "product_policy_failures": policy,
+                "declared_release_deltas": declared,
+                "compatibility_failures": compatibility,
                 "unreplayed_fixture_replies_including_alternatives": [
                     item for item in replay.planned if item not in replay.reached
                 ],
@@ -673,8 +792,26 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
             await runner.cleanup()
     if policy_failures:
         pytest.fail(_redact("SUPPLEMENT_POLICY_MISMATCH " + "\n".join(policy_failures)), pytrace=False)
-    if differences:
+    if integrated and compatibility_failures:
+        pytest.fail(_redact(
+            "SUPPLEMENT_COMPATIBILITY_MISMATCH " + "\n".join(compatibility_failures)
+        ), pytrace=False)
+    if not integrated and differences:
         pytest.fail(_redact("SUPPLEMENT_MISMATCH " + "\n".join(differences)), pytrace=False)
+
+
+@pytest.mark.parametrize("case_id", REPLAY_CASES)
+async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_path, socket_enabled):
+    """Retain every raw mismatch with the unchanged frozen result."""
+    await _run_supplemental(case_id, freezer, hass_storage, tmp_path, integrated=False)
+
+
+@pytest.mark.parametrize("case_id", REPLAY_CASES)
+async def test_supplemental_integrated_compatibility(
+    case_id, freezer, hass_storage, tmp_path, socket_enabled,
+):
+    """Check all public results against H1 plus exact, declared release deltas."""
+    await _run_supplemental(case_id, freezer, hass_storage, tmp_path, integrated=True)
 
 
 async def test_supplemental_late_calendar_fault(freezer, hass_storage, tmp_path, socket_enabled):
