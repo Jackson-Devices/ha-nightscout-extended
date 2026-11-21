@@ -26,6 +26,7 @@ from urllib.request import ProxyHandler, build_opener
 import xml.etree.ElementTree as ET
 
 from bootstrap import HARNESS, clean_env, read_lock
+from server_calendar import check_calendar, trace_calendar
 
 ROOT = HARNESS.parents[1]
 CONTRACT = ROOT / "tests_contract" / "contract" / "run.py"
@@ -159,15 +160,15 @@ def server_json(url, path, deadline):
         return json.load(response)
 
 
-def loopback_server(lock, entries, runner, results, pull, treatments=()):
+def loopback_server(lock, entries, runner, results, pull, treatments=(), *, protected=False):
     project = f"nightscout-h2-{secrets.token_hex(6)}"
     secret = secrets.token_hex(24)
     env = clean_env()
     env.update(
         H2_MONGO_IMAGE=lock["server"]["mongo"], H2_NIGHTSCOUT_IMAGE=lock["server"]["nightscout"],
         H2_NIGHTSCOUT_SECRET=secret,
-        H2_NIGHTSCOUT_DEFAULT_ROLE="denied" if treatments else "readable",
-        H2_NIGHTSCOUT_LOG_DRIVER="none" if treatments else "json-file",
+        H2_NIGHTSCOUT_DEFAULT_ROLE="denied" if protected else "readable",
+        H2_NIGHTSCOUT_LOG_DRIVER="none" if protected else "json-file",
     )
     command = ["docker", "compose", "--project-name", project, "--file", HARNESS / "server-compose.yml"]
 
@@ -198,7 +199,7 @@ def loopback_server(lock, entries, runner, results, pull, treatments=()):
         if not re.fullmatch(r"127\.0\.0\.1:\d+", address):
             raise ValueError("The disposable Nightscout port was not bound to loopback")
         url = f"http://{address}"
-        if treatments:
+        if protected:
             runner(url, hashlib.sha1(secret.encode("ascii")).hexdigest())
         else:
             runner(url)
@@ -221,6 +222,26 @@ def seed_treatments(anchor, seed):
     return treatments
 
 
+def seed_calendar(anchor, calendar):
+    anchor = anchor.astimezone(timezone.utc)
+    start = anchor - timedelta(minutes=calendar["minutes_before_anchor"])
+    end = start + timedelta(minutes=1)
+    rows = seed_treatments(anchor, calendar)
+    for row in rows:
+        when = datetime.fromtimestamp(row["millis"] / 1000, tz=timezone.utc)
+        row["document"]["created_at"] = when.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    overlap = rows[0]
+    fixture = {
+        "window": [start.isoformat(), end.isoformat()],
+        "overlap": {
+            "id": overlap["document"]["_id"]["$oid"],
+            "millis": overlap["millis"],
+            "duration": overlap["document"]["duration"],
+        },
+    }
+    return rows, fixture
+
+
 def server(args, lock, results):
     anchor = datetime.fromisoformat(args.anchor) if args.anchor else datetime.now(timezone.utc).replace(microsecond=0)
     if anchor.tzinfo is None:
@@ -228,6 +249,7 @@ def server(args, lock, results):
     seed = json.loads((HARNESS / "seed.json").read_text(encoding="utf-8"))
     entries = seed_entries(anchor, seed)
     latest = entries[-1]
+    calendar_rows, calendar = seed_calendar(anchor, seed["calendar"])
 
     def replay(url):
         deadline = time.monotonic() + 60
@@ -262,15 +284,19 @@ def server(args, lock, results):
             "seed": latest, "bgnow": {"last": bgnow["last"], "mills": bgnow["mills"]},
         })
         ha = args.state / "ha" / "bin" / "python"
-        result = step(args.output, "nightscout-client", [ha, Path(__file__).resolve(), "_server-client", url,
-                                                          str(latest["sgv"]), str(latest["date"])])
+        command = [ha, Path(__file__).resolve(), "_server-client", url, str(latest["sgv"]), str(latest["date"])]
+        if not args.url:
+            command.append(json.dumps(calendar))
+        result = step(args.output, "nightscout-client", command)
         if result.get("exit_code") == 1:
             result["status"] = "product_mismatch"
         results.append(result)
 
     if args.v3:
-        treatments = seed_treatments(anchor, seed)
-        fixture = {"glucose": latest["sgv"], "millis": latest["date"], "treatments": treatments}
+        treatments = [*seed_treatments(anchor, seed), *calendar_rows]
+        fixture = {
+            "glucose": latest["sgv"], "millis": latest["date"], "treatments": treatments, "calendar": calendar,
+        }
 
         def check_v3(url, admin_hash):
             ha = args.state / "ha" / "bin" / "python"
@@ -280,29 +306,34 @@ def server(args, lock, results):
                 result["status"] = "product_mismatch"
             results.append(result)
 
-        loopback_server(lock, entries, check_v3, results, args.pull, treatments=treatments)
+        loopback_server(lock, entries, check_v3, results, args.pull, treatments=treatments, protected=True)
     elif args.url:
         if not re.fullmatch(r"https?://[a-zA-Z0-9.-]+(?::\d+)?", args.url):
             raise ValueError("--url must be a disposable Nightscout base URL without credentials or a path")
         replay(args.url)
     else:
-        loopback_server(lock, entries, replay, results, args.pull)
+        loopback_server(lock, entries, replay, results, args.pull, treatments=calendar_rows)
 
 
-async def check_client(url, glucose, millis):
+async def check_client(url, glucose, millis, calendar_json=None):
     sys.path.insert(0, str(ROOT))
     from aiohttp import ClientSession, ClientTimeout
     from custom_components.nightscout_extended.api import NightscoutClient, NightscoutConnectionError
 
-    async with ClientSession(timeout=ClientTimeout(total=15)) as session:
+    trace, observed = trace_calendar(protected=False)
+    calendar_passed = True
+    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace]) as session:
+        client = NightscoutClient(session, url, None)
         try:
-            data = await NightscoutClient(session, url, None).async_get_data()
+            data = await client.async_get_data()
+            if calendar_json:
+                calendar_passed = await check_calendar(client, observed, json.loads(calendar_json), protected=False)
         except NightscoutConnectionError:
             print("Nightscout client did not read the working disposable server")
             return 1
     actual_time = int(data.glucose_time.timestamp() * 1000) if data.glucose_time else None
     print(json.dumps({"actual_glucose": data.glucose, "actual_date": actual_time}))
-    return 0 if (data.glucose, actual_time) == (int(glucose), int(millis)) else 1
+    return 0 if calendar_passed and (data.glucose, actual_time) == (int(glucose), int(millis)) else 1
 
 
 def main():

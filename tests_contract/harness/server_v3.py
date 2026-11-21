@@ -10,6 +10,8 @@ import sys
 import time
 from urllib.parse import quote, urlencode, urlsplit
 
+from server_calendar import check_calendar, trace_calendar
+
 
 AUTH = "/api/v2/authorization"
 ENTRIES = "/api/v3/entries"
@@ -169,10 +171,12 @@ async def prove_client(url, fixture, access):
                     observed.add(f"treatments-{field}")
 
     trace.on_request_end.append(collect)
-    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace]) as session:
+    calendar_trace, calendar_observed = trace_calendar(protected=True)
+    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace, calendar_trace]) as session:
         client = NightscoutClient(session, url, access)
         await client.async_get_status()
         data = await client.async_get_data()
+        calendar_passed = await check_calendar(client, calendar_observed, fixture["calendar"], protected=True)
     actual = {
         (row.notes, round(row.time.timestamp() * 1000), row.event_type, row.carbs, row.insulin)
         for row in data.treatments
@@ -190,7 +194,9 @@ async def prove_client(url, fixture, access):
     }
     print(json.dumps(result))
     required = {"version", "subject-exchange", "entries", "treatments-date", "treatments-created_at"}
-    return required <= observed and all(result[key] for key in ("bearer_only", "glucose", "time", "treatments"))
+    return calendar_passed and required <= observed and all(
+        result[key] for key in ("bearer_only", "glucose", "time", "treatments")
+    )
 
 
 async def prove_revoked_client(url, access):
