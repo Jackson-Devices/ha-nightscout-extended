@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from homeassistant.bootstrap import async_load_base_functionality
 from homeassistant.config_entries import ConfigEntryState, ConfigEntryStore
 from homeassistant.const import CONF_API_KEY, CONF_URL, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import CoreState
 from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import DATA_CUSTOM_COMPONENTS
 from homeassistant.util import dt as dt_util
@@ -144,12 +145,16 @@ class HomeAssistantObserver:
         self.storage.clear()
         self.storage.update(deepcopy(self.initial_state.get("storage", {})))
         self.context = async_test_home_assistant(
-            load_registries=False, config_dir=self.config_dir
+            load_registries=False, config_dir=self.config_dir, initial_state=CoreState.not_running,
         )
         self.hass = await self.context.__aenter__()
         self.hass.data.pop(DATA_CUSTOM_COMPONENTS)
         if not await async_load_base_functionality(self.hass):
             raise RuntimeError("Home Assistant could not initialize its native stores")
+        # The registries install their lifecycle listeners during bootstrap.
+        # Emit the native started event before setting up the entry under test.
+        await self.hass.async_start()
+        await self.hass.async_block_till_done()
         entries = self.hass.config_entries.async_entries(DOMAIN)
         entry_data = _entry_data(url, request["credentials"])
         if entries:
