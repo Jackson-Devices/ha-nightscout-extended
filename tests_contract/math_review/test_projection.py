@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 import pytest
+from homeassistant.const import STATE_UNKNOWN
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
@@ -38,23 +39,25 @@ class _ProjectionSite(_Nightscout):
 
     def __init__(self, mocker, raw_glucose, delta, source_ms):
         super().__init__(mocker, name="Math")
-        self.properties = {
-            "bgnow": {"last": float(raw_glucose), "mills": source_ms},
-            "delta": {"mgdl": float(delta)},
-            "direction": {"value": "FortyFiveUp"},
-            "iob": {"iob": 1.25},
-            "cob": {"cob": 12},
-            "ar2": {
-                "forecast": {
-                    "predicted": [
-                        {"mills": source_ms + 15 * MINUTE_MS + 2000, "mgdl": 165.25},
-                        {"mills": source_ms + 30 * MINUTE_MS + 2000, "mgdl": 180.5},
-                    ],
-                },
-            },
+        self.properties = {"iob": {"iob": 1.25}, "cob": {"cob": 12}}
+        self.publish(
+            "measurement", raw_glucose, delta, source_ms,
+            ((source_ms + 15 * MINUTE_MS + 2000, 165.25), (source_ms + 30 * MINUTE_MS + 2000, 180.5)),
+        )
+
+    def set_curve(self, points):
+        self.properties["ar2"] = {
+            "forecast": {"predicted": [{"mills": date, "mgdl": value} for date, value in points]},
         }
-        self.bgnow = self.properties["bgnow"]
-        self.put("measurement", _iso_ms(source_ms), float(raw_glucose), direction="FortyFiveUp")
+
+    def publish(self, identity, raw_glucose, delta, source_ms, points):
+        self.bgnow = {"last": float(raw_glucose), "mills": source_ms}
+        self.properties.update({
+            "bgnow": self.bgnow, "delta": {"mgdl": float(delta)}, "direction": {"value": "FortyFiveUp"},
+        })
+        self.set_curve(points)
+        self.put(identity, _iso_ms(source_ms), float(raw_glucose), direction="FortyFiveUp")
+        self.docs[identity]["date"] = source_ms
 
     async def _answer(self, method, url, data):
         if url.path == PROPERTIES:
@@ -73,11 +76,9 @@ class _ProjectionSite(_Nightscout):
 async def _loaded(hass, mocker, freezer, raw_glucose, *, delta="0.5", source_ms=SOURCE_MS):
     freezer.move_to(_iso_ms(HA_NOW_MS))
     site = _ProjectionSite(mocker, raw_glucose, delta, source_ms)
-    # Keep this wire datum exact for the millisecond case.
-    site.docs["measurement"]["date"] = source_ms
     entry = await _configure(hass, site)
     try:
-        yield entry
+        yield entry, site
     finally:
         await _unload(hass, entry)
 
@@ -116,6 +117,24 @@ def _assert_history(observed, source_mgdl, source_ms=SOURCE_MS):
     assert observed["card"]["chart"]["measured_path"]
 
 
+async def _refresh_at(hass, entry, freezer, now_ms):
+    freezer.move_to(_iso_ms(now_ms))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert entry.runtime_data.last_update_success
+
+
+def _assert_forecast_clock(bundle, key, source_ms, point, expected_state):
+    state = _state(bundle, key)
+    assert state["state"] == expected_state
+    assert datetime.fromisoformat(state["attributes"]["source_time"]) == datetime.fromisoformat(_iso_ms(source_ms))
+    target = state["attributes"]["forecast_time"]
+    if point is None:
+        assert target is None
+    else:
+        assert datetime.fromisoformat(target) == datetime.fromisoformat(_iso_ms(point[0]))
+
+
 @pytest.mark.parametrize(
     "source_mgdl",
     [
@@ -133,7 +152,7 @@ def _assert_history(observed, source_mgdl, source_ms=SOURCE_MS):
 async def test_projection_classifies_mgdl_at_configured_boundaries(
     hass, aioclient_mock, freezer, enable_custom_integrations, source_mgdl,
 ):
-    async with _loaded(hass, aioclient_mock, freezer, source_mgdl) as entry:
+    async with _loaded(hass, aioclient_mock, freezer, source_mgdl) as (entry, _):
         await _set_units(hass, entry, glucose=MGDL)
         observed = await observe_projection(hass, entry, now_ms=HA_NOW_MS)
         _assert_sensor(observed["ha"], "glucose", source_mgdl, MGDL)
@@ -152,7 +171,7 @@ async def test_hypothesis_projection_alarm_band_is_unit_invariant(
     hass, aioclient_mock, freezer, enable_custom_integrations, source_mgdl,
 ):
     """Candidate risk: HA uses 18.016, while the card converts units with 18.0182."""
-    async with _loaded(hass, aioclient_mock, freezer, source_mgdl) as entry:
+    async with _loaded(hass, aioclient_mock, freezer, source_mgdl) as (entry, _):
         await _set_units(hass, entry, glucose=MGDL)
         mg = await observe_projection(hass, entry, now_ms=HA_NOW_MS)
         await _set_units(hass, entry, glucose=MMOL)
@@ -180,7 +199,7 @@ async def test_projection_formats_signed_mgdl_delta_at_halves(
     hass, aioclient_mock, freezer, enable_custom_integrations, delta, text,
 ):
     """Characterize the existing UI's Math.round tie direction."""
-    async with _loaded(hass, aioclient_mock, freezer, "180.5", delta=delta) as entry:
+    async with _loaded(hass, aioclient_mock, freezer, "180.5", delta=delta) as (entry, _):
         await _set_units(hass, entry, glucose=MGDL, glucose_delta=MGDL, forecast_30=MGDL)
         observed = await observe_projection(hass, entry, now_ms=HA_NOW_MS)
         _assert_sensor(observed["ha"], "glucose", "180.5", MGDL)
@@ -200,7 +219,7 @@ async def test_hypothesis_projection_formats_mixed_sibling_units_in_primary_unit
     hass, aioclient_mock, freezer, enable_custom_integrations, primary, siblings, delta_text, forecast_text,
 ):
     """Ask whether the card converts each sibling's selected unit before formatting."""
-    async with _loaded(hass, aioclient_mock, freezer, "180", delta="9.5") as entry:
+    async with _loaded(hass, aioclient_mock, freezer, "180", delta="9.5") as (entry, _):
         await _set_units(hass, entry, glucose=primary, glucose_delta=siblings, forecast_15=primary, forecast_30=siblings)
         observed = await observe_projection(hass, entry, now_ms=HA_NOW_MS)
         for key, source, unit in (
@@ -216,8 +235,8 @@ async def test_hypothesis_projection_formats_mixed_sibling_units_in_primary_unit
 async def test_projection_uses_browser_freshness_without_aging_ha_state(
     hass, aioclient_mock, freezer, enable_custom_integrations,
 ):
-    async with _loaded(hass, aioclient_mock, freezer, "180") as entry:
-        await _set_units(hass, entry, glucose=MGDL, glucose_delta=MGDL, forecast_30=MGDL)
+    async with _loaded(hass, aioclient_mock, freezer, "180") as (entry, site):
+        await _set_units(hass, entry, glucose=MGDL, glucose_delta=MGDL, forecast_15=MGDL, forecast_30=MGDL)
         exact_ms = SOURCE_MS + 15 * MINUTE_MS
         fresh = await observe_projection(hass, entry, now_ms=exact_ms, config={"stale_minutes": 15})
         stale = await observe_projection(hass, entry, now_ms=exact_ms + 1, config={"stale_minutes": 15})
@@ -234,19 +253,61 @@ async def test_projection_uses_browser_freshness_without_aging_ha_state(
         assert "30 min ≈ 181" in fresh["card"]["footer"]
         assert _state(stale["ha"], "forecast_30")["state"] == _state(fresh["ha"], "forecast_30")["state"]
 
-        await entry.runtime_data.async_refresh()
-        await hass.async_block_till_done()
-        refreshed = await observe_projection(hass, entry, now_ms=exact_ms + 1)
-        assert _state(refreshed["ha"], "last_reading")["state"] == _state(fresh["ha"], "last_reading")["state"]
-        assert _state(refreshed["ha"], "forecast_30")["attributes"] == _state(fresh["ha"], "forecast_30")["attributes"]
-        assert refreshed["card"]["classification"]["level"] == "stale"
+        # HA now advances too. A successful poll of the same upstream reading
+        # and curve keeps their source times and entity availability.
+        quiet_ms = SOURCE_MS + 16 * MINUTE_MS
+        await _refresh_at(hass, entry, freezer, quiet_ms)
+        quiet = await observe_projection(hass, entry, now_ms=quiet_ms)
+        _assert_history(quiet, "180")
+        for key in ("glucose", "last_reading", "forecast_15", "forecast_30"):
+            assert _state(quiet["ha"], key)["state"] == _state(fresh["ha"], key)["state"]
+        for key in ("forecast_15", "forecast_30"):
+            assert _state(quiet["ha"], key)["attributes"] == _state(fresh["ha"], key)["attributes"]
+        assert quiet["card"]["classification"]["level"] == "stale"
+        assert quiet["card"]["chart"]["forecast_path"] == ""
+
+        # A newly uploaded measurement has its own ID, measurement time and
+        # write time. Nightscout supplies a separate AR2 curve anchored to it.
+        new_ms = quiet_ms + MINUTE_MS + 7
+        points = ((new_ms + 15 * MINUTE_MS + 2000, 160.75), (new_ms + 30 * MINUTE_MS + 2000, 169.5))
+        freezer.move_to(_iso_ms(new_ms + 1000))
+        site.publish("new-measurement", "160.25", "-1.5", new_ms, points)
+        next_poll_ms = quiet_ms + 2 * MINUTE_MS
+        await _refresh_at(hass, entry, freezer, next_poll_ms)
+        recovered = await observe_projection(hass, entry, now_ms=next_poll_ms)
+        actual = recovered["ha"]
+        assert actual["entity_ids"] == quiet["ha"]["entity_ids"]
+        _assert_sensor(actual, "glucose", "160.25", MGDL)
+        assert _state(actual, "last_reading")["state"] == "2026-01-08T12:17:00+00:00"
+        assert actual["history"]["readings"] == [
+            *quiet["ha"]["history"]["readings"],
+            {"id": "new-measurement", "date": new_ms, "sgv": 160.25, "direction": "FortyFiveUp"},
+        ]
+        assert recovered["card"]["chart"]["points"] == [[SOURCE_MS, 180], [new_ms, 160.25]]
+        _assert_forecast_clock(actual, "forecast_15", new_ms, points[0], "160.75")
+        _assert_forecast_clock(actual, "forecast_30", new_ms, points[1], "169.5")
+        assert recovered["card"]["classification"]["level"] == "in_range"
+        assert recovered["card"]["value"] == "160"
+        assert recovered["card"]["chart"]["forecast_path"]
+        assert "30 min ≈ 170" in recovered["card"]["footer"]
+
+        # The upstream curve now omits only +15. Keep the new measurement and
+        # +30 forecast with their original source times.
+        site.set_curve(points[1:])
+        next_poll_ms += MINUTE_MS
+        await _refresh_at(hass, entry, freezer, next_poll_ms)
+        partial = await observe_projection(hass, entry, now_ms=next_poll_ms)
+        assert partial["ha"]["history"]["readings"] == actual["history"]["readings"]
+        _assert_forecast_clock(partial["ha"], "forecast_15", new_ms, None, STATE_UNKNOWN)
+        _assert_forecast_clock(partial["ha"], "forecast_30", new_ms, points[1], "169.5")
+        assert "30 min ≈ 170" in partial["card"]["footer"]
 
 
 async def test_projection_keeps_measurement_milliseconds_in_history_and_card(
     hass, aioclient_mock, freezer, enable_custom_integrations,
 ):
     original_ms = SOURCE_MS + 7
-    async with _loaded(hass, aioclient_mock, freezer, "180", source_ms=original_ms) as entry:
+    async with _loaded(hass, aioclient_mock, freezer, "180", source_ms=original_ms) as (entry, _):
         observed = await observe_projection(hass, entry, now_ms=HA_NOW_MS)
         _assert_history(observed, "180", original_ms)
         # HA timestamp state has whole seconds. Raw action and forecast clocks
