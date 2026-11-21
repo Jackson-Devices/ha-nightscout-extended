@@ -3,12 +3,14 @@
     {
       "minutes_before_anchor": 6,
       "sgv": 172,
-      "direction": "Flat"
+      "direction": "Flat",
+      "id": "610000000000000000000001"
     },
     {
       "minutes_before_anchor": 1,
       "sgv": 184,
-      "direction": "FortyFiveUp"
+      "direction": "FortyFiveUp",
+      "id": "610000000000000000000002"
     }
   ],
   "device": "h2-synthetic-replay",
@@ -60,5 +62,19 @@
         }
       }
     ]
+  },
+  "ordered_sgv": {
+    "far": {
+      "id": "610000000000000000000003",
+      "minutes_before_anchor": 7200,
+      "sgv": 149,
+      "direction": "Flat"
+    },
+    "late": {
+      "minutes_before_anchor": 12,
+      "sgv": 161,
+      "edited_sgv": 163,
+      "direction": "Flat"
+    }
   }
 }

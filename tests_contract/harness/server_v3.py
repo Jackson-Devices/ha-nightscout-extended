@@ -11,6 +11,7 @@ import time
 from urllib.parse import quote, urlencode, urlsplit
 
 from server_calendar import check_calendar, trace_calendar
+from server_sgv import prove_v3_sgv
 
 
 AUTH = "/api/v2/authorization"
@@ -33,7 +34,7 @@ def request(port, path, *, method="GET", headers=None, body=None):
     try:
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
-        if response.status != 200:
+        if response.status not in (200, 201):
             return response.status, None
         return response.status, json.load(response)
     finally:
@@ -58,19 +59,19 @@ def require(value, phase):
         raise QualificationError(phase)
 
 
-def native_subject(port, admin):
+def native_subject(port, admin, *, name=SUBJECT, role="readable"):
     headers = {"api-secret": admin}
     endpoint = f"{AUTH}/subjects"
     await_read(lambda: request(port, endpoint, headers=headers), lambda body: isinstance(body, list), "subject administration")
-    status, _ = request(port, endpoint, method="POST", headers=headers, body={"name": SUBJECT, "roles": ["readable"]})
+    status, _ = request(port, endpoint, method="POST", headers=headers, body={"name": name, "roles": [role]})
     require(status == 200, "subject creation")
     status, subjects = request(port, endpoint, headers=headers)
     require(status == 200 and isinstance(subjects, list), "subject listing")
-    subject = next((row for row in subjects if row.get("name") == SUBJECT), {})
+    subject = next((row for row in subjects if row.get("name") == name), {})
     access = subject.get("accessToken")
-    require(subject.get("roles") == ["readable"] and isinstance(access, str) and access, "read-only subject")
+    require(subject.get("roles") == [role] and isinstance(access, str) and access, "disposable subject role")
     status, exchange = request(port, f"{AUTH}/request/{quote(access, safe='')}")
-    require(status == 200 and isinstance(exchange, dict) and exchange.get("sub") == SUBJECT, "subject exchange")
+    require(status == 200 and isinstance(exchange, dict) and exchange.get("sub") == name, "subject exchange")
     bearer = exchange.get("token")
     valid_times = isinstance(exchange.get("iat"), int) and isinstance(exchange.get("exp"), int)
     require(isinstance(bearer, str) and bearer and valid_times and 0 < exchange["iat"] < exchange["exp"],
@@ -223,6 +224,35 @@ async def prove_revoked_client(url, access):
     return outcomes == {"data": 401, "status": 401}
 
 
+async def prove_ordered_sgv(url, port, fixture, access, reader_bearer, admin):
+    from aiohttp import ClientSession, ClientTimeout
+    from custom_components.nightscout_extended.api import NightscoutClient
+
+    for action in ("create", "update", "delete"):
+        name = f"api:entries:{action}"
+        restricted = f"{AUTH}/debug/check/{quote(name, safe=':')}"
+        require(request(port, restricted, headers=reader_bearer)[0] in (401, 403), "read-only SGV subject")
+
+    _, writer_bearer, writer_id, _ = native_subject(port, admin, name="sgv-fixture-writer", role="admin")
+
+    async def mutate(method, path, body):
+        status, response = await asyncio.to_thread(request, port, path, method=method, headers=writer_bearer, body=body)
+        require(status == (201 if method == "POST" else 200), f"native SGV fixture {method}")
+        if method == "POST":
+            require(isinstance(response, dict) and isinstance(response.get("identifier"), str)
+                    and type(response.get("lastModified")) is int, "native SGV creation receipt")
+        return response
+
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=15)) as session:
+            client = NightscoutClient(session, url, access)
+            await client.async_get_status()
+            await prove_v3_sgv(client, fixture, mutate)
+    finally:
+        status, _ = request(port, f"{AUTH}/subjects/{writer_id}", method="DELETE", headers={"api-secret": admin})
+        require(status == 200, "remove disposable SGV fixture writer")
+
+
 def main(url, fixture_json):
     logging.disable(logging.CRITICAL)
     parsed = urlsplit(url)
@@ -243,6 +273,10 @@ def main(url, fixture_json):
     try:
         if not asyncio.run(prove_client(url, fixture, access)):
             return 1
+        asyncio.run(prove_ordered_sgv(url, parsed.port, fixture["ordered_sgv"], access, bearer, admin))
+    except QualificationError as exc:
+        print(f"v3 ordered SGV fixture failed: {exc}")
+        return 2
     except ImportError:
         print("v3 client environment is incomplete")
         return 2

@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 
 from bootstrap import HARNESS, clean_env, read_lock
 from server_calendar import check_calendar, trace_calendar
+from server_sgv import prove_legacy_sgv
 
 ROOT = HARNESS.parents[1]
 CONTRACT = ROOT / "tests_contract" / "contract" / "run.py"
@@ -145,6 +146,7 @@ def seed_entries(anchor, seed):
     for entry in seed["entries"]:
         when = anchor - timedelta(minutes=entry["minutes_before_anchor"])
         entries.append({
+            "_id": {"$oid": entry["id"]},
             "type": "sgv", "sgv": entry["sgv"], "direction": entry["direction"],
             "date": int(when.timestamp() * 1000), "dateString": when.isoformat(), "device": seed["device"],
         })
@@ -242,6 +244,28 @@ def seed_calendar(anchor, calendar):
     return rows, fixture
 
 
+def seed_ordered_sgv(anchor, seed, recent):
+    specs = seed["ordered_sgv"]
+    far = seed_entries(anchor, {"entries": [specs["far"]], "device": seed["device"]})[0]
+    minutes_ago = specs["late"]["minutes_before_anchor"]
+    late_date = int((anchor - timedelta(minutes=minutes_ago)).timestamp() * 1000)
+    late = {
+        "type": "sgv", "date": late_date, "app": "sgv-qualification", "device": seed["device"],
+        "sgv": specs["late"]["sgv"], "direction": specs["late"]["direction"],
+    }
+
+    def expected(row):
+        return [row["_id"]["$oid"], row["date"], row["sgv"], row["direction"]]
+
+    fixture = {
+        "recent": [expected(row) for row in recent],
+        "far": expected(far),
+        "window": [late_date, int(anchor.timestamp() * 1000)],
+        "late": {"document": late, "edited_sgv": specs["late"]["edited_sgv"]},
+    }
+    return [far, *recent], fixture
+
+
 def server(args, lock, results):
     anchor = datetime.fromisoformat(args.anchor) if args.anchor else datetime.now(timezone.utc).replace(microsecond=0)
     if anchor.tzinfo is None:
@@ -249,6 +273,7 @@ def server(args, lock, results):
     seed = json.loads((HARNESS / "seed.json").read_text(encoding="utf-8"))
     entries = seed_entries(anchor, seed)
     latest = entries[-1]
+    seeded_entries, ordered_sgv = seed_ordered_sgv(anchor, seed, entries)
     calendar_rows, calendar = seed_calendar(anchor, seed["calendar"])
 
     def replay(url):
@@ -286,7 +311,7 @@ def server(args, lock, results):
         ha = args.state / "ha" / "bin" / "python"
         command = [ha, Path(__file__).resolve(), "_server-client", url, str(latest["sgv"]), str(latest["date"])]
         if not args.url:
-            command.append(json.dumps(calendar))
+            command.extend([json.dumps(calendar), json.dumps(ordered_sgv)])
         result = step(args.output, "nightscout-client", command)
         if result.get("exit_code") == 1:
             result["status"] = "product_mismatch"
@@ -296,6 +321,7 @@ def server(args, lock, results):
         treatments = [*seed_treatments(anchor, seed), *calendar_rows]
         fixture = {
             "glucose": latest["sgv"], "millis": latest["date"], "treatments": treatments, "calendar": calendar,
+            "ordered_sgv": ordered_sgv,
         }
 
         def check_v3(url, admin_hash):
@@ -306,16 +332,16 @@ def server(args, lock, results):
                 result["status"] = "product_mismatch"
             results.append(result)
 
-        loopback_server(lock, entries, check_v3, results, args.pull, treatments=treatments, protected=True)
+        loopback_server(lock, seeded_entries, check_v3, results, args.pull, treatments=treatments, protected=True)
     elif args.url:
         if not re.fullmatch(r"https?://[a-zA-Z0-9.-]+(?::\d+)?", args.url):
             raise ValueError("--url must be a disposable Nightscout base URL without credentials or a path")
         replay(args.url)
     else:
-        loopback_server(lock, entries, replay, results, args.pull, treatments=calendar_rows)
+        loopback_server(lock, seeded_entries, replay, results, args.pull, treatments=calendar_rows)
 
 
-async def check_client(url, glucose, millis, calendar_json=None):
+async def check_client(url, glucose, millis, calendar_json=None, sgv_json=None):
     sys.path.insert(0, str(ROOT))
     from aiohttp import ClientSession, ClientTimeout
     from custom_components.nightscout_extended.api import NightscoutClient, NightscoutConnectionError
@@ -328,6 +354,9 @@ async def check_client(url, glucose, millis, calendar_json=None):
             data = await client.async_get_data()
             if calendar_json:
                 calendar_passed = await check_calendar(client, observed, json.loads(calendar_json), protected=False)
+            if sgv_json:
+                await client.async_get_status()
+                await prove_legacy_sgv(client, json.loads(sgv_json))
         except NightscoutConnectionError:
             print("Nightscout client did not read the working disposable server")
             return 1
