@@ -81,9 +81,10 @@ def test_latest_contact_without_reservoir_suppresses_older_reading():
 
 
 @pytest.mark.parametrize("v3", [False, True], ids=["v1", "v3"])
-def test_device_status_acquisition_is_bounded_and_complete(v3):
+def test_device_status_acquisition_is_bounded_and_complete(v3, monkeypatch):
     async def run():
         calls = []
+        v3_filters = []
         rows = [
             _status("new-upload", contact="2026-01-08T11:40:00Z", units=24),
             _status("earlier-upload", units=0),
@@ -93,6 +94,7 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
         rows[1]["created_at"] = "2026-01-08T12:00:30.000Z"
         del rows[1]["date"]  # v3 must also scan old storage with only created_at.
         saturated = False
+        extra_rows = []
 
         async def status(_):
             return web.json_response({"settings": {"units": "mg/dl"}})
@@ -116,14 +118,16 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
                 field = query["sort$desc"]
                 assert field in {"date", "created_at"}
                 assert query[f"{field}$gte"] == "2026-01-08T11:00:00.000Z"
-                assert query[f"{field}$lte"] == "2026-01-08T12:01:00.000Z"
+                # Nightscout 15.0.6 keeps only the last predicate for a field.
+                predicates = [key for key in query if key.startswith(f"{field}$")]
+                v3_filters.append((field, predicates))
+                predicate = predicates[-1]
+                threshold = datetime.fromisoformat(query[predicate])
                 fields = query["fields"].split(",")
-                assert fields == ["identifier", "device", "pump", "isValid"]
+                assert fields == ["identifier", "device", "pump", "isValid", "date", "created_at"]
                 limit, skip = int(query["limit"]), int(query["skip"])
                 if limit > 1:
                     return web.json_response({"message": "Parameter limit out of tolerance"}, status=400)
-                low = datetime.fromisoformat(query[f"{field}$gte"])
-                high = datetime.fromisoformat(query[f"{field}$lte"])
                 matching = []
                 for row in rows:
                     if field not in row:
@@ -132,8 +136,11 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
                         datetime.fromtimestamp(row[field] / 1000, tz=timezone.utc) if field == "date"
                         else datetime.fromisoformat(row[field])
                     )
-                    if low <= observed <= high:
+                    within = observed <= threshold if predicate.endswith("$lte") else observed >= threshold
+                    if within:
                         matching.append(row)
+                # The client also checks the returned timestamps if the wire range is breached.
+                matching.extend(extra_rows)
                 # Nightscout 15.0.6 prunes response fields by top-level name.
                 page = [
                     {name: row[name] for name in fields if name in row}
@@ -148,7 +155,7 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
             low = query["find[created_at][$gte]"]
             high = query["find[created_at][$lte]"]
             matching = [row for row in rows if low <= row["created_at"] <= high]
-            return web.json_response([rows[0]] * count if saturated else matching)
+            return web.json_response([rows[0]] * count if saturated else [*matching, *extra_rows])
 
         app = web.Application()
         app.router.add_get("/api/v1/status.json", status)
@@ -165,11 +172,40 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
             async with aiohttp.ClientSession() as session:
                 client = api.NightscoutClient(session, f"http://{address}:{port}", "test-subject" if v3 else None)
                 await client.async_get_status()
-                assert await client.async_get_reservoir(NOW, DEVICE_A) == api.ReservoirReading(
-                    0, datetime(2026, 1, 8, 11, 55, tzinfo=timezone.utc), DEVICE_A,
-                )
+                expected = api.ReservoirReading(0, datetime(2026, 1, 8, 11, 55, tzinfo=timezone.utc), DEVICE_A)
+                assert await client.async_get_reservoir(NOW, DEVICE_A) == expected
+                assert await client.async_get_reservoir(NOW, None) is None
+
+                # A competing legacy upload predates the window by 61 minutes.
+                old_device = rows[2]
+                old_upload = NOW - timedelta(minutes=121)
+                old_device["created_at"] = old_upload.isoformat()
+                del old_device["date"]
+                # Its stale pump contact would still qualify the label for discovery
+                # if the outer range were accidentally widened.
+                old_device["pump"]["status"]["timestamp"] = old_upload.isoformat()
+
+                too_late = NOW + timedelta(minutes=1, milliseconds=1)
+                late_upload = _status("late-outer", "future-uploader")
+                late_upload.update(date=round(too_late.timestamp() * 1000), created_at=too_late.isoformat())
+                outside = _status("out-of-window-response", "old-uploader", contact=old_upload.isoformat())
+                outside.update(date=int(old_upload.timestamp() * 1000), created_at=old_upload.isoformat())
+                invalid = _status("corrupt-outer", "corrupt-uploader")
+                invalid.update(date="bad date", created_at=None)
+                extra_rows[:] = [late_upload, outside, invalid]
+                assert await client.async_get_reservoir(NOW, None) == expected
+
+                # A current upload with a corrupt measurement still makes discovery ambiguous.
+                rows.append(_status("current-invalid-contact", DEVICE_B, contact="bad contact"))
+                assert await client.async_get_reservoir(NOW, None) is None
+                assert await client.async_get_reservoir(NOW, DEVICE_A) == expected
                 assert set(calls) == {V3 if v3 else V1}
-                if not v3:
+                if v3:
+                    assert all(names == [f"{field}$gte"] for field, names in v3_filters)
+                    monkeypatch.setattr(api, "_V3_MAX_PAGES", 1)
+                    with pytest.raises(api.NightscoutConnectionError, match="paging bound exceeded"):
+                        await client.async_get_reservoir(NOW, DEVICE_A)
+                else:
                     saturated = True
                     with pytest.raises(api.NightscoutConnectionError, match="Incomplete"):
                         await client.async_get_reservoir(NOW, DEVICE_A)
