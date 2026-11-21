@@ -533,20 +533,26 @@ class NightscoutClient:
         return parse_treatments(await self._legacy_treatment_range(_iso(start), _iso(end), limit))
 
     async def _calendar_lookback(self, default_length: timedelta, before: datetime) -> timedelta:
-        threshold = f"{default_length.total_seconds() / 60:g}"
+        minimum_minutes = default_length.total_seconds() / 60
         if self._use_v3:
             payload = await self._protected_v3(
                 _V3_TREATMENTS,
-                {"duration$gt": threshold, "sort$desc": "duration", "limit": "1", "skip": "0"},
+                {
+                    "duration$gt": f"{minimum_minutes:g}", "sort$desc": "duration",
+                    "limit": "1", "skip": "0",
+                },
             )
             rows = _v3_result(payload, _V3_TREATMENTS, list)
         else:
+            # Older v1 servers leave duration comparison operands as strings.
+            # The Mongo driver coerces a sort tuple's direction to a number.
             rows = await self._get(
                 _V1_TREATMENTS,
                 {
                     "find[created_at][$lt]": _v3_iso(before),
-                    "find[duration][$gt]": threshold,
-                    "sort[duration]": "desc",
+                    "find[duration][$type]": "number",
+                    "sort[0][0]": "duration",
+                    "sort[0][1]": "desc",
                     "count": "1",
                 },
             )
@@ -556,11 +562,14 @@ class NightscoutClient:
             if len(rows) == 1 and isinstance(rows[0], dict):
                 raw = rows[0].get("duration")
                 duration = _num(raw) if type(raw) in (int, float) else None
-                if duration is not None and duration > float(threshold):
-                    try:
-                        return timedelta(minutes=duration)
-                    except OverflowError:
-                        pass
+                if duration is not None:
+                    if duration > minimum_minutes:
+                        try:
+                            return timedelta(minutes=duration)
+                        except OverflowError:
+                            pass
+                    elif not self._use_v3:
+                        return default_length
         raise NightscoutConnectionError("Invalid maximum treatment duration from Nightscout")
 
     async def async_get_calendar_treatments(

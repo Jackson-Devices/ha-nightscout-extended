@@ -98,7 +98,9 @@ def _mock_site(
     mocker.get(f"{URL}{PROPERTIES}", json=props)
     if not v3:
         mocker.get(f"{URL}{VERSION}", status=404)
-        mocker.get(f"{URL}{TREATMENTS_V1}", params={"sort[duration]": "desc"}, json=[])
+        mocker.get(
+            f"{URL}{TREATMENTS_V1}", params={"sort[0][0]": "duration", "sort[0][1]": "desc"}, json=[],
+        )
         mocker.get(f"{URL}{TREATMENTS_V1}", json=list(treatments))
         return
 
@@ -360,12 +362,18 @@ async def test_calendar_reads_authoritative_overlaps_and_preserves_cached_fallba
             assert query["skip"] == "0" and query["duration$gt"] == "5"
             candidates = [row for row in rows if row.get("duration", 0) > 5]
             return reply(sorted(candidates, key=lambda row: row["duration"], reverse=True)[:1])
-        if not v3 and "find[duration][$gt]" in query:
-            assert query["sort[duration]"] == "desc" and query["count"] == "1"
-            assert query["find[duration][$gt]"] == "5"
+        if not v3 and query.get("count") == "1":
+            # The 15.0.6 Mongo driver does not coerce object sort directions.
+            if "sort[duration]" in query:
+                return AiohttpClientMockResponse(method, url, status=200, text="")
+            # Nightscout 15.0.6 does not coerce v1 duration comparison operands.
+            if "find[duration][$gt]" in query:
+                return reply([])
+            assert query["sort[0][0]"] == "duration" and query["sort[0][1]"] == "desc"
+            assert query["find[duration][$type]"] == "number"
             assert query["find[created_at][$lt]"] == "2026-01-08T18:40:00.000Z"
             candidates = [
-                row for row in rows if row.get("duration", 0) > 5
+                row for row in rows if type(row.get("duration")) in (int, float)
                 and _ms(row["created_at"]) < _ms(query["find[created_at][$lt]"])
             ]
             return reply(sorted(candidates, key=lambda row: row["duration"], reverse=True)[:1])
@@ -437,7 +445,13 @@ async def test_calendar_reads_authoritative_overlaps_and_preserves_cached_fallba
         assert edited[0]["summary"] == "Edited interval"
         assert edited[0]["end"] == "2026-01-08T18:51:00+00:00"
         del rows[0]
-        assert [event["summary"] for event in await calendar()] == ["Five-minute default", "First page only"]
+        expected = ["Five-minute default", "First page only"]
+        assert [event["summary"] for event in await calendar()] == expected
+        for short_duration in (4, 5):
+            rows[0]["duration"] = short_duration
+            assert [event["summary"] for event in await calendar()] == expected
+        del rows[0]["duration"]
+        assert [event["summary"] for event in await calendar()] == expected
 
         failed_scan = True
         assert [event["summary"] for event in await calendar()] == ["Five-minute default", "Cached marker"]
