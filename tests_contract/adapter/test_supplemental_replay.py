@@ -7,7 +7,7 @@ fixture replies the integration reached.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import format_datetime
 import json
 from pathlib import Path
@@ -15,6 +15,7 @@ from urllib.parse import quote, quote_plus
 
 from aiohttp import web
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_socket import socket_allow_hosts
 
@@ -24,7 +25,7 @@ from custom_components.nightscout_extended.api import (
 )
 from tests_contract.adapter.observe_ha import HomeAssistantObserver
 from tests_contract.contract import run as frozen
-from tests_contract.contract.service import WATCHED_HEADERS, reply
+from tests_contract.contract.service import WATCHED_HEADERS, document, epoch, reply
 
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
@@ -38,16 +39,21 @@ REPLAY_CASES = {
     "G-V3-DELTA": "raw v3 SGV rows; absent legacy computed delta is a fixture gap",
     "D-CALCULATED": "raw calculated properties and v1 status; mixed legacy query uses the entry input",
     "D-SETTINGS-ONLY": "legacy v1 status is available to the actual setup and HA state",
-    "F-AR2-MIXED": "raw v3 SGV and AR2 with independently sourced v2 bgnow anchor",
+    "F-AR2-MIXED": "raw AR2 and a companion v2 bgnow clock from the phase's shifted input sample",
     "T-LEGACY": "raw legacy poll and calendar replies are scoped to their HA consumers",
-    "T-V3-PAGED": "frozen pages by exact skip; a short first page may terminate a larger native scan",
-    "T-FUTURE-OVERLAP": "future data and later-page faults remain distinct replies",
+    "T-V3-PAGED": "actual bounds, sort and paging over the frozen calendar inventory",
+    "T-FUTURE-OVERLAP": "native range behavior; separate broad-window late-page fault probe",
 }
 PROPERTY_GROUPS = {
     "delta": {"bgnow", "delta"},
     "calculated": {"iob", "cob", "basal"},
     "forecast": {"ar2"},
 }
+THRESHOLD_KEYS = {
+    "bg_high": "bgHigh", "bg_target_top": "bgTargetTop",
+    "bg_target_bottom": "bgTargetBottom", "bg_low": "bgLow",
+}
+CALENDAR_PAGE_CAP = 2
 
 
 def _data():
@@ -87,6 +93,34 @@ def _json_response(body):
     return 200, {}, 0, json.dumps(body).encode("utf-8")
 
 
+def _timestamp(value):
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            return parsed
+    return None
+
+
+def _range_rows(rows, field, lower, upper, *, inclusive_end, descending):
+    bounds = _timestamp(lower), _timestamp(upper)
+    if None in bounds:
+        return None
+    start, end = bounds
+    dated = [(when, row) for row in rows if (when := _timestamp(row.get(field))) is not None]
+    selected = [
+        (when, row) for when, row in dated
+        if start <= when and (when <= end if inclusive_end else when < end)
+    ]
+    if descending:
+        selected.sort(key=lambda item: item[0], reverse=True)
+    return [row for _, row in selected]
+
+
 class SupplementalReplay:
     """Serve raw fixture data and audit the integration's real loopback traffic."""
 
@@ -95,8 +129,9 @@ class SupplementalReplay:
         self.errors = []
         self.channel = "entry"
         self.active_bearers = set()
+        self.exchange_replies = {}
 
-    def set_step(self, step, request):
+    def set_step(self, case_id, step, request):
         self.planned = list(
             dict.fromkeys(
                 tuple(item)
@@ -104,7 +139,9 @@ class SupplementalReplay:
                 for item in trace
             )
         )
+        self.case_id = case_id
         self.request = request
+        self.interface_reload = False
         self.calls.clear()
         self.errors.clear()
         self.reached = set()
@@ -140,14 +177,36 @@ class SupplementalReplay:
         self.reached.add(source)
         return _wire_response(route, payload)
 
+    def _site_payload(self):
+        source = self._planned({"status"})
+        name = source[2] if source else (
+            "site-mmol" if self.request["units"] == "mmol/L" else "site-mg"
+        )
+        body = DATA["objects"][name]
+        settings = body["settings"]
+        # The corpus stores stable contract keys. Nightscout v1 exposes these
+        # same measurement values under its status API's camelCase keys.
+        thresholds = {THRESHOLD_KEYS.get(key, key): value
+                      for key, value in settings["thresholds"].items()}
+        return source, name, {**body, "settings": {**settings, "thresholds": thresholds}}
+
+    @property
+    def units(self):
+        return self._site_payload()[2]["settings"]["units"]
+
     def _properties(self, names, call):
         call["route"] = "properties"
         if names - {"bgnow", "delta", "direction", "iob", "cob", "ar2", "basal"}:
             return 404, {}, 0, b"{}"
         body = {}
-        if self.request["operation"] in {"derived", "forecast", "site"} and "bgnow" in names:
-            # This is an independent, unchanged v2 reading fixture. It allows
-            # the mixed forecast to expose whether the client uses its v2 anchor.
+        if self.case_id == "F-AR2-MIXED" and "bgnow" in names:
+            entry = self._planned({"entries3"})
+            if entry is None or "sgv-shift" not in DATA["lists"][entry[2]]:
+                raise ValueError("the mixed AR2 phase requires the supplied shifted sample")
+            sample = DATA["records"]["sgv-shift"]
+            body["bgnow"] = {"last": sample["sgv"], "mills": epoch(sample["at"])}
+            call["anchor"] = "companion:phase-entry/sgv-shift"
+        elif self.request["operation"] in {"derived", "site"} and "bgnow" in names:
             body["bgnow"] = DATA["objects"]["delta-mg"]["bgnow"]
             call["anchor"] = "companion:delta-mg.bgnow"
         for group, fields in PROPERTY_GROUPS.items():
@@ -165,34 +224,131 @@ class SupplementalReplay:
         call.setdefault("fixture", "companion:properties")
         return _json_response(body)
 
+    def _treatments(self, wire, request, auth, call):
+        query = request.query
+        calendar = self.channel == "calendar"
+        if calendar and ("duration$gt" in query or "find[duration][$gt]" in query):
+            return self._maximum_duration(wire, query, auth, call)
+        if wire == "1":
+            route = "calendar1" if calendar else "treatments1"
+            source = self._planned({route}, auth)
+            if source is None:
+                return self._empty_or_denied({route}, wire, call)
+            response = self._respond_planned(source, call)
+            if response[0] != 200 or source[2] not in DATA["lists"]:
+                return response
+            count = int(query["count"])
+            rows = _range_rows(
+                json.loads(response[3]), "created_at", query.get("find[created_at][$gte]"),
+                query.get("find[created_at][$lte]"), inclusive_end=True, descending=False,
+            )
+            if rows is None or count <= 0:
+                return 400, {}, 0, b"{}"
+            call.update(limit=count, lower=query.get("find[created_at][$gte]"),
+                        upper=query.get("find[created_at][$lte]"), returned=min(len(rows), count))
+            return _json_response(rows[:count])
+
+        field = query.get("sort$desc")
+        if field not in {"date", "created_at"}:
+            return 400, {}, 0, b"{}"
+        limit, skip = int(query.get("limit", 0)), int(query.get("skip", 0))
+        call.update(range_field=field, limit=limit, skip=skip,
+                    lower=query.get(f"{field}$gte"), upper=query.get(f"{field}$lt"))
+        if limit <= 0 or skip < 0:
+            return 400, {}, 0, b"{}"
+        if calendar and field == "date" and limit > CALENDAR_PAGE_CAP:
+            # The real Nightscout API rejects an oversized page. The product
+            # chooses its own next limit and offsets.
+            call["fixture"] = "companion:configured-page-cap"
+            return 400, {}, 0, b'{"message":"Parameter limit out of tolerance"}'
+
+        routes = ({route for route, _, _ in self.planned if route.startswith("calendar3-")}
+                  if calendar else {"treatments3"})
+        sources = [item for item in self.planned if item[0] in routes and item[1] == auth]
+        if not sources:
+            return self._empty_or_denied(routes, wire, call)
+        if field == "created_at":
+            # The frozen v3 input corpus stores treatments under date, so the
+            # separate true created_at range query also exercises empty pages.
+            call["fixture"] = "companion:empty-created-at-scan"
+            return _json_response({"status": 200, "result": []})
+
+        faults = [
+            item for item in sources if item[2] in DATA["faults"]
+            and (not calendar or skip == int(item[0].rsplit("-", 1)[-1]))
+        ]
+        if faults:
+            return self._respond_planned(faults[0], call)
+        record_ids = dict.fromkeys(
+            record_id for _, _, body in sources for record_id in DATA["lists"].get(body, ())
+        )
+        # A database inventory contains a storage row once. Discard only
+        # repeat references to the same frozen input record, never ID aliases.
+        rows = _range_rows(
+            [document(record_id, DATA["records"], "v3") for record_id in record_ids],
+            field, call["lower"], call["upper"], inclusive_end=False, descending=True,
+        )
+        if rows is None:
+            return 400, {}, 0, b"{}"
+        page = rows[skip:skip + limit]
+        call.update(fixture="ranged:frozen-collection", returned=len(page),
+                    sources=[item[2] for item in sources if item[2] in DATA["lists"]])
+        self.reached.update(item for item in sources if item[2] in DATA["lists"])
+        return _json_response({"status": 200, "result": page})
+
+    def _maximum_duration(self, wire, query, auth, call):
+        prefix = "calendar3-" if wire == "3" else "calendar1"
+        records = DATA["records"]
+        candidates = {
+            record_id for route, credential, payload in self.planned
+            if route.startswith(prefix) and credential == auth
+            for record_id in DATA["lists"].get(payload, ())
+            if type(records[record_id].get("duration")) in (int, float)
+        }
+        raw_min = query.get("duration$gt", query.get("find[duration][$gt]"))
+        minimum = float(raw_min)
+        ordered = sorted(candidates, key=lambda key: (-records[key]["duration"], key))
+        selected = [key for key in ordered if records[key]["duration"] > minimum]
+        if wire == "3":
+            if query.get("sort$desc") != "duration" or query.get("skip") != "0":
+                return 400, {}, 0, b"{}"
+            limit = int(query["limit"])
+        else:
+            if query.get("sort[duration]") not in {"desc", "-1"}:
+                return 400, {}, 0, b"{}"
+            limit = int(query["count"])
+            before = _timestamp(query.get("find[created_at][$lt]"))
+            if before is None:
+                return 400, {}, 0, b"{}"
+            selected = [key for key in selected if _timestamp(records[key]["at"]) < before]
+        rows = [document(key, records, f"v{wire}") for key in selected[:limit]]
+        call.update(fixture="ranged:calendar-duration-inventory", range_field="duration",
+                    limit=limit, returned=len(rows))
+        return _json_response({"status": 200, "result": rows} if wire == "3" else rows)
+
+    def _empty_or_denied(self, routes, wire, call):
+        if self._planned(routes) is not None:
+            call["fixture"] = "rejected:fixture-authorization"
+            return 401, {}, 0, b"{}"
+        call["fixture"] = "companion:empty-collection"
+        return _json_response({"status": 200, "result": []} if wire == "3" else [])
+
     def _collection(self, path, request, auth, call):
         version, collection = path.split("/")[2:]
         stem = "entries" if collection == "entries" else "treatments"
         wire = version[-1]
         routes = {stem + wire}
         call["route"] = f"{version}/{stem}"
-        if stem == "treatments" and self.channel == "calendar":
-            skip = request.query.get("skip", "0")
-            routes = {"calendar1"} if wire == "1" else {"calendar3-" + skip}
         if wire == "3":
             if auth == "none" or auth not in self.active_bearers:
                 call["fixture"] = "rejected:v3-authorization"
                 return 401, {}, 0, b"{}"
-            # The v3 serialization of this collection fixture contains no
-            # created_at rows. Account for the independent compatibility scan.
-            if stem == "treatments" and any(
-                key.startswith("created_at$") for key in request.query
-            ):
-                call["fixture"] = "companion:empty-created-at-scan"
-                return _json_response({"status": 200, "result": []})
+        if stem == "treatments":
+            return self._treatments(wire, request, auth, call)
         source = self._planned(routes, auth)
         if source is not None:
             return self._respond_planned(source, call)
-        if any(self._planned({route}) for route in routes):
-            call["fixture"] = "rejected:fixture-authorization"
-            return 401, {}, 0, b"{}"
-        call["fixture"] = "companion:empty-collection"
-        return _json_response({"status": 200, "result": []} if wire == "3" else [])
+        return self._empty_or_denied(routes, wire, call)
 
     def _dispatch(self, request, auth, call):
         path = request.path
@@ -202,11 +358,19 @@ class SupplementalReplay:
             call["route"] = "exchange"
             routes = {key for key, (route, _, _) in DATA["routes"].items() if route == path}
             source = self._planned(routes, auth)
-            if source is None or auth != "none":
+            if auth == "none" and source is not None:
+                response = self._respond_planned(source, call)
+            elif auth == "none" and self.interface_reload and path in self.exchange_replies:
+                call["fixture"] = "companion:repeat-successful-exchange-after-native-reload"
+                response = self.exchange_replies[path]
+            elif auth == "none" and self.case_id == "A-V3-PUBLIC-VERSION" and "exchange" in routes:
+                call["fixture"] = "companion:exchange-after-public-version"
+                response = _wire_response("exchange", "bearer-current")
+            else:
                 call["fixture"] = "rejected:unplanned-exchange"
                 return 401, {}, 0, b"{}"
-            response = self._respond_planned(source, call)
             if response[0] == 200:
+                self.exchange_replies[path] = response
                 issued = json.loads(response[3])["token"]
                 self.active_bearers.update(
                     name for name, (query, headers) in DATA["auth"].items()
@@ -223,7 +387,10 @@ class SupplementalReplay:
                 return 404, {}, 0, b"{}"
             source = self._planned({"version"}, "none")
             if source is not None:
-                return self._respond_planned(source, call)
+                response = self._respond_planned(source, call)
+                if response[0] == 200:
+                    call["api_version"] = json.loads(response[3])["result"]["apiVersion"]
+                return response
             call["fixture"] = "companion:version"
             return _json_response(DATA["objects"]["version"])
         if path.startswith(("/api/v1/", "/api/v2/properties/")) and auth not in {
@@ -233,12 +400,13 @@ class SupplementalReplay:
             return 401, {}, 0, b"{}"
         if path in {"/api/v1/status", "/api/v1/status.json"}:
             call["route"] = "v1/status"
-            source = self._planned({"status"})
+            source, name, body = self._site_payload()
             if source is not None:
-                return self._respond_planned(source, call)
-            name = "site-mmol" if self.request["units"] == "mmol/L" else "site-mg"
-            call["fixture"] = f"companion:{name}"
-            return _json_response(DATA["objects"][name])
+                self._respond_planned(source, call)
+            else:
+                call["fixture"] = f"companion:{name}"
+            call["projection"] = "nightscout-v1-threshold-field-names"
+            return _json_response(body)
         if path.startswith("/api/v2/properties/"):
             return self._properties(set(path.rsplit("/", 1)[-1].split(",")), call)
         canonical = path.removesuffix(".json")
@@ -254,8 +422,9 @@ class SupplementalReplay:
             "consumer": self.channel,
             "auth": self._auth(request),
             "query_keys": sorted({
-                key for key in request.query if key.startswith(("date$", "created_at$", "find["))
-                or key in {"limit", "skip", "count", "type", "sort$desc", "sort$asc"}
+                key for key in request.query
+                if key.startswith(("date$", "created_at$", "find["))
+                or key in {"limit", "skip", "count", "type", "sort$desc", "sort[duration]", "duration$gt"}
             }),
         }
         self.calls.append(call)
@@ -294,6 +463,132 @@ def _render(event):
     print(_redact(json.dumps(event, sort_keys=True)), flush=True)
 
 
+def _product_policy(case_id, index, actual, expected, wire, entry_state):
+    """Separate release behavior checks from the unaltered H1 comparisons."""
+    failures = []
+
+    def require(condition, explanation):
+        if not condition:
+            failures.append(explanation)
+
+    def compare(want, got, field):
+        try:
+            frozen.compare(want, got, {}, path=f"product.{field}")
+        except frozen.Mismatch as error:
+            failures.append(str(error))
+
+    def calls(route):
+        return [call for call in wire if call["route"] == route]
+
+    def sensor(role, *, omit_timestamp=False):
+        value = actual[role]
+        require(value is not None, f"{role} is exposed by HA")
+        if value is not None:
+            if omit_timestamp:
+                compare(expected[role][:2] + expected[role][3:4], value[:2] + value[3:4], role)
+            else:
+                measured = value[:4]
+                if measured[1] == "mmol/L" and type(measured[0]) in (float, int):
+                    measured[0] = round(measured[0], 1)
+                compare(expected[role][:4], measured, role)
+
+    if case_id == "A-V3-PUBLIC-VERSION":
+        require(
+            [(c["auth"], c["status"], c.get("api_version")) for c in calls("v3/version")]
+            == [("none", 200, DATA["objects"]["version"]["result"]["apiVersion"])],
+            "v3 version is observed once without credentials",
+        )
+        require(entry_state == "loaded", "the version probe permits real HA setup")
+    elif case_id in {"A-V3-RENEW", "A-V3-REVOKED"}:
+        sensor("glucose")
+        auth_trace = [
+            (call["route"], call["status"]) for call in wire
+            if call["route"] in {"v3/entries", "exchange"}
+        ]
+        if index == 2:
+            reactive = [("v3/entries", 401), ("exchange", 200), ("v3/entries", 200)]
+            proactive = [("exchange", 200), ("v3/entries", 200)]
+            alternatives = [reactive] if case_id == "A-V3-REVOKED" else [reactive, proactive]
+            require(auth_trace in alternatives, "a single renewal is followed by a successful read")
+        else:
+            require(len(calls("exchange")) == (1 if index == 1 else 0),
+                    "the first load exchanges once and the unchanged next poll uses its cached bearer")
+    elif case_id == "A-V3-SUBJECT-FAILURES":
+        if index < 3:
+            compare([401], [c["status"] for c in calls("exchange")], "failed subject exchange")
+            require(not calls("v3/entries") and entry_state == "loaded", "legacy proof permits legacy fallback")
+            glucose = actual["glucose"]
+            require(glucose is not None and glucose[3] == "unknown", "permissive legacy replay has no glucose")
+        else:
+            sensor("glucose")
+            compare([200], [c["status"] for c in calls("v3/entries")], "recovered v3 entries")
+    elif case_id == "A-V3-FORBIDDEN":
+        if index == 1:
+            compare([403], [c["status"] for c in calls("v3/entries")], "protected denial")
+            require(len(calls("exchange")) == 1 and not calls("v1/treatments"),
+                    "protected 403 causes neither renewal nor legacy downgrade")
+            require(entry_state == "setup_error" and actual["glucose"] is None,
+                    "the denied entry does not publish glucose")
+        else:
+            sensor("glucose")
+    elif case_id in {"G-PUBLIC-DELTA", "G-V3-DELTA"}:
+        sensor("glucose")
+        if actual["glucose"] is not None:
+            attributes = actual["glucose"][4]
+            if case_id == "G-PUBLIC-DELTA":
+                require(not calls("v3/entries"), "public legacy reads its raw V2 computed delta")
+                compare((17, 17, -17, None, 10, None, 0)[index - 1],
+                        attributes.get("delta"), "legacy delta in mg/dL")
+            else:
+                compare([200], [c["status"] for c in calls("v3/entries")], "protected entries")
+                require(attributes.get("delta") is None, "no V2 delta can be used without an agreeing V2 reading")
+    elif case_id == "D-CALCULATED":
+        for role in ("iob", "cob", "basal"):
+            sensor(role, omit_timestamp=True)
+        if index == 4:
+            require(any(c["status"] == 503 for c in calls("properties")),
+                    "the upstream fault makes exposed calculated sensors unavailable")
+        else:
+            compare(expected["site_settings"], actual["site_settings"], "site settings")
+    elif case_id == "D-SETTINGS-ONLY":
+        compare(expected["site_settings"], actual["site_settings"], "site settings")
+        require(any(c["status"] == 200 for c in calls("v1/status")), "site settings came from native status reads")
+    elif case_id == "F-AR2-MIXED":
+        # The four input snapshots select nearest points within the released
+        # three-minute tolerance. Offset/conflicting points remain in the curve.
+        quantities = ((207, 231), (302, 231), (207, 231), (207, 330))[index - 1]
+        for role, quantity in zip(("forecast_15", "forecast_30"), quantities, strict=True):
+            value = actual[role]
+            require(value is not None and value[:2] == [quantity, "mg/dL"] and value[3] == "available",
+                    f"{role} must report {quantity} mg/dL from the original v2 curve")
+    elif case_id.startswith("T-"):
+        insulin, carbs = actual["latest_bolus"], actual["latest_carbs"]
+        require(insulin is not None and insulin[3] == "available", "the latest insulin observation remains available")
+        require(carbs is not None and carbs[:2] == [36, "g"], "the latest completed carbs remain 36 g")
+        if case_id == "T-LEGACY":
+            require(insulin is not None and insulin[:2] == [7.25, "U"],
+                    "legacy numeric-string insulin behavior remains compatible")
+        calendar_calls = [call for call in wire if call["consumer"] == "calendar"]
+        scan = [call for call in calendar_calls if call.get("range_field") == "date" and call["status"] == 200]
+        event = actual["calendar"]
+        rows = event[0] if isinstance(event, list) and isinstance(event[0], list) else []
+        if case_id == "T-FUTURE-OVERLAP":
+            start, end = DATA["records"]["future-carbs"]["at"], "2026-01-08T12:50:00Z"
+            has_future = any(row[1] == start and row[6] == end for row in rows)
+            require(has_future is (index in {1, 2, 3, 6}),
+                    "calendar returns the long event only when it overlaps the requested interval")
+        else:
+            starts = {row[1] for row in rows}
+            require({"2026-01-08T11:00:00Z", "2026-01-08T11:40:00Z"} <= starts,
+                    "range includes both original lower and middle treatments")
+            require(("2026-01-08T11:50:00Z" in starts) is (index < 3),
+                    "the deleted bolus no longer appears")
+            if case_id == "T-V3-PAGED":
+                require(len(scan) >= 3 and scan[-1]["returned"] < scan[-1]["limit"],
+                        "a capped calendar scan reads multiple actual pages and reaches a short terminal page")
+    return failures
+
+
 @pytest.mark.parametrize("case_id", REPLAY_CASES)
 async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_path, socket_enabled):
     """Keep taking observations after an earlier expected semantic difference."""
@@ -301,6 +596,8 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
     replay = SupplementalReplay()
     observer = None
     differences = []
+    policy_failures = []
+    last_units = None
     app = web.Application()
     app.router.add_route("*", "/{path:.*}", replay.handle)
     runner = web.AppRunner(app, access_log=None)
@@ -311,7 +608,7 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
         for raw_step, (index, request, expected, _, seed, empty_store, lookups) in zip(
             CASES[case_id]["steps"], PREPARED[case_id], strict=True
         ):
-            replay.set_step(raw_step, request)
+            replay.set_step(case_id, raw_step, request)
             if observer is None or request["lifecycle"] != "poll":
                 if seed is not None or lookups is not None:
                     raise RuntimeError("seeded registry is outside supplemental coverage")
@@ -325,7 +622,23 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
                 if previous is not None:
                     observer.load_state(previous)
 
-            actual = await observer.observe(url, request)
+            interface_request = request
+            if observer.hass is not None and last_units != replay.units:
+                # The real integration reads display units at setup, not on an
+                # ordinary poll. Use the normal native reload to see the change.
+                replay.interface_reload = True
+                interface_request = request | {"lifecycle": "reload"}
+            last_units = replay.units
+            actual = await observer.observe(url, interface_request)
+            if case_id == "D-CALCULATED" and index == 1:
+                if actual["basal"] is not None:
+                    policy_failures.append("step 1: basal must be disabled by default")
+                row = observer._row("basal")
+                if row is None or not row.disabled:
+                    raise RuntimeError("baseline basal registry row is missing or unexpectedly enabled")
+                er.async_get(observer.hass).async_update_entity(row.entity_id, disabled_by=None)
+                replay.interface_reload = True
+                actual = await observer.observe(url, request | {"lifecycle": "reload"})
             if replay.errors:
                 raise RuntimeError(f"fixture HTTP handler failed: {replay.errors!r}")
             mismatches = []
@@ -337,11 +650,15 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
                 except frozen.Mismatch as error:
                     mismatches.append(str(error))
             differences.extend(f"step {index}: {mismatch}" for mismatch in mismatches)
+            policy = _product_policy(case_id, index, actual, expected, replay.calls, observer.entry_state)
+            policy_failures.extend(f"step {index}: {failure}" for failure in policy)
             _render({
                 "kind": "supplemental-ha-replay", "case": case_id, "step": index,
                 "scope": REPLAY_CASES[case_id], "setup_state": observer.entry_state,
                 "lifecycle": request["lifecycle"], "observed": actual,
+                "observer_reloaded": replay.interface_reload,
                 "differences": mismatches, "wire": replay.calls,
+                "product_policy_failures": policy,
                 "unreplayed_fixture_replies_including_alternatives": [
                     item for item in replay.planned if item not in replay.reached
                 ],
@@ -354,5 +671,47 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
                 await observer.close()
         finally:
             await runner.cleanup()
+    if policy_failures:
+        pytest.fail(_redact("SUPPLEMENT_POLICY_MISMATCH " + "\n".join(policy_failures)), pytrace=False)
     if differences:
         pytest.fail(_redact("SUPPLEMENT_MISMATCH " + "\n".join(differences)), pytrace=False)
+
+
+async def test_supplemental_late_calendar_fault(freezer, hass_storage, tmp_path, socket_enabled):
+    """A wide range has enough supplied rows to reach the frozen later-page 503."""
+    socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
+    case_id = "T-FUTURE-OVERLAP"
+    _, request, _, _, _, _, _ = PREPARED[case_id][0]
+    broad, failure = CASES[case_id]["steps"][:2]
+    fault = next(item for item in failure["wire"] if item[0] == "calendar3-2")
+    replay = SupplementalReplay()
+    replay.set_step(case_id, broad | {"wire": [*broad["wire"], fault]}, request)
+    observer = SupplementalObserver(freezer, hass_storage, tmp_path, replay)
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", replay.handle)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        actual = await observer.observe(url, request)
+        _render({"kind": "supplemental-late-calendar-fault", "observed": actual, "wire": replay.calls})
+        assert not replay.errors, _redact(str(replay.errors))
+        calls = [
+            call for call in replay.calls if call["consumer"] == "calendar"
+            and call.get("range_field") == "date" and call["status"] in {200, 503}
+        ]
+        assert [(call["skip"], call["status"]) for call in calls] == [
+            (0, 200), (1, 200), (2, 503),
+        ]
+        assert all(call["returned"] == call["limit"] == 1 for call in calls[:2])
+        assert observer.entry_state == "loaded"
+        assert actual["calendar"][3] == "available"
+        # The public calendar falls back to the successful poll snapshot.
+        # Its 11:40 event was outside the two calendar pages actually returned.
+        assert any(event[1] == "2026-01-08T11:40:00Z" for event in actual["calendar"][0])
+    finally:
+        try:
+            await observer.close()
+        finally:
+            await runner.cleanup()
