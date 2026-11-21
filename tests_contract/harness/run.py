@@ -149,9 +149,12 @@ def seed_entries(anchor, seed):
     return entries
 
 
-def server_json(url, path):
+def server_json(url, path, deadline):
+    timeout = min(5, deadline - time.monotonic())
+    if timeout <= 0:
+        raise TimeoutError("Nightscout readiness deadline expired")
     opener = build_opener(ProxyHandler({}))
-    with opener.open(url + path, timeout=5) as response:
+    with opener.open(url + path, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -204,21 +207,36 @@ def server(args, lock, results):
 
     def replay(url):
         deadline = time.monotonic() + 60
-        while True:
+        seed_seen = False
+        while time.monotonic() < deadline:
             try:
-                status = server_json(url, "/api/v1/status.json")
-                records = server_json(url, "/api/v1/entries/sgv.json?count=2")
+                status = server_json(url, "/api/v1/status.json", deadline)
+                records = server_json(url, "/api/v1/entries/sgv.json?count=2", deadline)
                 if isinstance(status, dict) and status.get("version") and isinstance(records, list) and any(
                     item.get("date") == latest["date"] and item.get("sgv") == latest["sgv"]
                     and item.get("device") == seed["device"] for item in records if isinstance(item, dict)
                 ):
-                    break
+                    seed_seen = True
+                    properties = server_json(url, "/api/v2/properties/bgnow", deadline)
+                    bgnow = properties.get("bgnow") if isinstance(properties, dict) else None
+                    if isinstance(bgnow, dict) and (bgnow.get("last"), bgnow.get("mills")) == (
+                        latest["sgv"], latest["date"],
+                    ) and time.monotonic() < deadline:
+                        break
             except (OSError, ValueError):
                 pass
-            if time.monotonic() >= deadline:
-                raise ValueError("Nightscout did not return the expected synthetic seed")
-            time.sleep(1)
-        results.append({"name": "nightscout-replay", "status": "passed", "version": status["version"], "seed": latest})
+            time.sleep(max(0, min(1, deadline - time.monotonic())))
+        else:
+            reason = (
+                "Nightscout did not calculate glucose and time for the expected synthetic seed"
+                if seed_seen else "Nightscout did not return the expected synthetic seed"
+            )
+            results.append({"name": "nightscout-replay", "status": "infrastructure_failure", "error": reason})
+            return
+        results.append({
+            "name": "nightscout-replay", "status": "passed", "version": status["version"],
+            "seed": latest, "bgnow": {"last": bgnow["last"], "mills": bgnow["mills"]},
+        })
         ha = args.state / "ha" / "bin" / "python"
         result = step(args.output, "nightscout-client", [ha, Path(__file__).resolve(), "_server-client", url,
                                                           str(latest["sgv"]), str(latest["date"])])
