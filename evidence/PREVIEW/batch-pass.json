@@ -1,0 +1,72 @@
+{
+  "format": "nightscout-release-verification/1",
+  "result": "PASS",
+  "source": "Independent Codex Cloud final receiver, coordinator transcription",
+  "product": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+  "qa": "0628a3989d0a89eaefa806d3db22643758cce6d3",
+  "tooling": "68aa7dd90c13e7dcca684d2d095b6fe71206d122",
+  "suite": "f1a4e7dddf071f2c6d3eb2b27499ee4536d76ab3",
+  "previous_refusal": "d035e6e315b7265b74f30b666e8c1d41ecb7aa7a",
+  "bootstrap_exit": 0,
+  "collector_exit": 0,
+  "preview_exit": 0,
+  "gates": {
+    "passed": 11,
+    "total": 11,
+    "api": 115,
+    "ha": 54,
+    "ha_positive": 4,
+    "integrated_supplemental": 14,
+    "node_card": 16,
+    "node_reporter": "tap",
+    "h1_controls": {
+      "good": 0,
+      "wrong_route": 1,
+      "wrong_state": 1,
+      "broken_environment": 2,
+      "markers_matched": true
+    },
+    "stock_nightscout": {
+      "version": "15.0.6",
+      "public_v1_exit": 0,
+      "protected_v3_exit": 0
+    }
+  },
+  "raw_frozen_comparison": {
+    "gating": false,
+    "exit_code": 1,
+    "passed": 1,
+    "mismatches": 12,
+    "harness_errors": 0
+  },
+  "refusals": {
+    "wrong_version": {
+      "exit": 1,
+      "archive_created": false
+    },
+    "missing_gate": {
+      "exit": 1,
+      "archive_created": false
+    },
+    "failed_gate": {
+      "exit": 1,
+      "archive_created": false
+    }
+  },
+  "preview": {
+    "sha256": "92ac666ff2a3ad290c1964a62ef446a18015e492dd8c76c771053f8bd00059df",
+    "install_files": 21,
+    "install_matches_product_and_qa": true,
+    "version": "0.3.2"
+  },
+  "cloud_receipt_sha256": {
+    "gates": "6ec53a0fd0299ca3bcdc7acfdc693632ea2fefd6a4e40470a9f2fbf23ffd02c3",
+    "preview": "bdf3c27ed297df454a88f30ae74508f4298b211926ce145562611a795a4bef02"
+  },
+  "all_six_refs_verified": true,
+  "five_frozen_files_matched": true,
+  "disposable_server_resources_remaining": 0,
+  "existing_upstream_tag_commit": "4bf8594a6baa82189aac53b3e76cded687b87e6d",
+  "production": "held",
+  "online_tag_created": false
+}
