@@ -1,11 +1,35 @@
-// Unit tests for the glucose card's pure logic. Run: node --test tests_js
+// Tests for the glucose card's logic and rendered output. Run: node --test tests_js
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-// Just enough DOM for the module to load outside a browser.
-globalThis.HTMLElement = class {};
-globalThis.customElements = { get: () => true, define() {} };
+// Just enough DOM for the real card's rendering methods to run outside a browser.
+function element() {
+  return {
+    style: { setProperty() {} },
+    children: [],
+    setAttribute() {},
+    replaceChildren(...children) { this.children = children; },
+  };
+}
+
+globalThis.HTMLElement = class {
+  attachShadow() {
+    const elements = new Map();
+    return {
+      querySelector(selector) {
+        if (!elements.has(selector)) elements.set(selector, element());
+        return elements.get(selector);
+      },
+    };
+  }
+};
+const registered = new Map();
+globalThis.customElements = {
+  get: (name) => registered.get(name),
+  define: (name, constructor) => registered.set(name, constructor),
+};
 globalThis.window = globalThis;
+globalThis.document = { createElement: element };
 
 const { logic } = await import("../custom_components/nightscout_extended/www/nightscout-glucose-card.js");
 const T = { urgent_low: 55, low: 80, high: 180, urgent_high: 260 };
@@ -63,6 +87,122 @@ test("thresholds fall back to Nightscout defaults per key", () => {
 test("night colours are coloured text on black", () => {
   assert.deepEqual(logic.colors("in_range", true), { bg: "#000000", fg: "#f3e7a6" });
   assert.equal(logic.colors("high", false).fg, "#1f1f1f");
+});
+
+const GLUCOSE = "sensor.test_glucose";
+const timeAt = (clock) => `2026-01-08T${clock}Z`;
+const prediction = (clock, mgdl) => ({ time: timeAt(clock), mgdl });
+const recorded = (clock, s) => ({ lu: Date.parse(timeAt(clock)) / 1000, s });
+const commands = (path) => path.match(/[ML]/g) || [];
+
+function renderFixture(t, config = {}) {
+  t.mock.method(Date, "now", () => Date.parse(timeAt("12:00:00")));
+  const Card = registered.get("nightscout-glucose-card");
+  const card = new Card();
+  card.setConfig({ entity: GLUCOSE, hours_to_show: 1, night_mode: false, ...config });
+  card._build();
+
+  return async function render({ glucose = "152", last = timeAt("11:58:00"), forecast, history = [] } = {}) {
+    card.hass = {
+      states: {
+        [GLUCOSE]: { state: glucose, attributes: { unit_of_measurement: "mg/dL" } },
+        "sensor.test_last_reading": { state: last },
+        "sensor.test_forecast_in_30_minutes": forecast,
+      },
+      callWS: async () => ({ [GLUCOSE]: history }),
+    };
+    await new Promise(setImmediate);
+    const paths = [...card._el.chart.innerHTML.matchAll(/<path d="([^"]*)"/g)];
+    return {
+      reading: card._el.value.textContent,
+      footer: card._el.footer.children.map((node) => node.textContent),
+      historyPath: paths[0][1],
+      forecastPath: paths[1][1],
+    };
+  };
+}
+
+test("an unknown 30-minute scalar leaves usable future forecast points visible", async (t) => {
+  const render = renderFixture(t);
+  const result = await render({
+    last: timeAt("12:00:02"),
+    forecast: { state: "unknown", attributes: {
+      source_time: timeAt("11:55:00"),
+      forecast_time: null,
+      forecast: [
+        prediction("12:10:00", 160),
+        prediction("12:00:01", 145),
+        prediction("11:58:00", 141),
+        prediction("12:05:00", 155),
+      ],
+    } },
+  });
+  assert.deepEqual(result.footer, []);
+  assert.deepEqual(commands(result.forecastPath), ["M", "L", "L"]);
+  const xs = [...result.forecastPath.matchAll(/[ML]([\d.]+),/g)].map(([, x]) => Number(x));
+  assert.ok(xs[0] < xs[1] && xs[1] < xs[2], "future curve must run forward from the measured point");
+});
+
+test("old v2 AR2 is hidden while current v3 glucose stays visible", async (t) => {
+  const render = renderFixture(t);
+  const result = await render({ forecast: { state: "169", attributes: {
+    source_time: timeAt("11:41:00"),
+    forecast_time: timeAt("12:11:02"),
+    forecast: [prediction("12:11:02", 169)],
+  } } });
+  assert.equal(result.reading, "152");
+  assert.deepEqual(result.footer, []);
+  assert.equal(result.forecastPath, "");
+});
+
+test("footer expiry and explicit null times are distinct from absent legacy metadata", async (t) => {
+  const render = renderFixture(t, { stale_minutes: 45 });
+  const points = [prediction("11:59:00", 149), prediction("12:07:00", 169)];
+  const legacy = await render({ forecast: { state: "169", attributes: { forecast: points } } });
+  assert.deepEqual(legacy.footer, ["30 min ≈ 169"]);
+  assert.deepEqual(commands(legacy.forecastPath), ["M", "L"]);
+
+  for (const forecastTime of [timeAt("11:59:00"), null]) {
+    const expired = await render({ forecast: { state: "169", attributes: {
+      source_time: timeAt("11:29:00"), forecast_time: forecastTime, forecast: points,
+    } } });
+    assert.deepEqual(expired.footer, []);
+    assert.deepEqual(commands(expired.forecastPath), ["M", "L"]);
+  }
+
+  const missingAnchor = await render({ forecast: { state: "169", attributes: {
+    source_time: null, forecast_time: timeAt("12:07:00"), forecast: points,
+  } } });
+  assert.deepEqual(missingAnchor.footer, []);
+  assert.equal(missingAnchor.forecastPath, "");
+});
+
+test("history keeps measured segments through dropout and does not bridge them on reconnect", async (t) => {
+  const render = renderFixture(t, { stale_minutes: 8 });
+  const history = [
+    recorded("11:20:00", "151"), recorded("11:21:00", "152"), recorded("11:22:00", "unknown"),
+    recorded("11:23:00", "154"), recorded("11:24:00", "156"), recorded("11:25:00", "unavailable"),
+    recorded("11:26:00", "158"), recorded("11:27:00", "160"),
+    recorded("11:36:00", "165"), recorded("11:37:00", "167"), recorded("11:38:00", "unavailable"),
+  ];
+  const forecast = { state: "169", attributes: {
+    source_time: timeAt("11:58:00"),
+    forecast_time: timeAt("12:28:00"),
+    forecast: [prediction("12:28:00", 169)],
+  } };
+  const dropout = await render({ glucose: "unavailable", last: "unavailable", forecast, history });
+  assert.equal(dropout.reading, "---");
+  assert.deepEqual(dropout.footer, ["⚠ No recent reading"]);
+  assert.equal(dropout.forecastPath, "");
+  assert.deepEqual(commands(dropout.historyPath), ["M", "L", "M", "L", "M", "L", "M", "L"]);
+
+  const recovered = await render({ forecast, history });
+  assert.equal(recovered.reading, "152");
+  assert.deepEqual(recovered.footer, ["30 min ≈ 169"]);
+  assert.ok(recovered.historyPath.startsWith(dropout.historyPath));
+  const current = recovered.historyPath.slice(dropout.historyPath.length).match(/^M([\d.]+,[\d.]+)L\1$/);
+  assert.ok(current, "the one recovered reading is a separate visible point");
+  assert.ok(recovered.forecastPath.startsWith(`M${current[1]}L`));
 });
 
 test("card version matches manifest.json, so browsers reload it after an update", async () => {

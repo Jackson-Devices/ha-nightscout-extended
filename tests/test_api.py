@@ -56,6 +56,69 @@ def test_garbage_values_dont_crash():
     assert d.iob is None and d.cob is None and d.forecast == []
 
 
+@pytest.mark.parametrize(
+    ("family", "malformed", "attribute"),
+    [
+        ("bgnow", ["not an object"], "glucose"),
+        ("delta", "not an object", "delta"),
+        ("direction", ["not an object"], "direction"),
+        ("direction", {"value": ["not a string"]}, "direction"),
+        ("iob", 1, "iob"),
+        ("iob", {**PROPS["iob"], "source": {"not": "text"}}, "iob_source"),
+        ("cob", True, "cob"),
+        ("cob", {**PROPS["cob"], "source": ["not text"]}, "cob_source"),
+        ("basal", {"current": "not an object"}, "basal"),
+    ],
+)
+def test_malformed_optional_property_does_not_discard_other_families(family, malformed, attribute):
+    data = api.parse_properties({**PROPS, family: malformed})
+    assert getattr(data, attribute) is None
+    healthy = api.parse_properties(PROPS)
+    for name in ("glucose", "delta", "direction", "iob", "cob", "basal"):
+        if name != attribute:
+            assert getattr(data, name) == getattr(healthy, name)
+    assert data.forecast == healthy.forecast
+
+
+@pytest.mark.parametrize(
+    "ar2",
+    [
+        None,
+        ["not an object"],
+        {"forecast": "not an object"},
+        {"forecast": {"predicted": {"mills": 1, "mgdl": 100}}},
+        {"forecast": {"predicted": "not an array"}},
+        {"forecast": {"predicted": 123}},
+    ],
+)
+def test_absent_or_malformed_curve_keeps_known_bgnow_source(ar2):
+    data = api.parse_properties({**PROPS, "ar2": ar2})
+    assert data.glucose == 155
+    assert data.forecast_source_time == datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+    assert data.forecast == []
+    assert data.forecast_at(15) is None and data.forecast_at(30) is None
+
+
+@pytest.mark.parametrize("horizon", [15, 30])
+def test_malformed_forecast_points_keep_usable_siblings_and_independent_horizons(horizon):
+    anchor = PROPS["bgnow"]["mills"]
+    point = {"mills": anchor + horizon * 60_000 + 2_000, "mgdl": 181}
+    earlier = {"mills": anchor + 5 * 60_000, "mgdl": 166}
+    malformed = [
+        None, False, "bad", [point], {"mills": ["wrong"], "mgdl": 200},
+        {"mills": point["mills"] - 1, "mgdl": "nan"},
+        {"mills": point["mills"], "mgdl": True},
+    ]
+    data = api.parse_properties({
+        **PROPS,
+        "ar2": {"forecast": {"predicted": [point, *malformed, earlier]}},
+    })
+    assert [p.mgdl for p in data.forecast] == [166, 181]
+    assert data.forecast_at(horizon).time == api._ms_to_dt(point["mills"])
+    assert data.forecast_at(45 - horizon) is None
+    assert data.iob == 1.35 and data.delta == 6
+
+
 SECRET = "averylongapisecret"
 
 
@@ -312,6 +375,76 @@ async def _configured_data(client):
     return status, await client.async_get_data()
 
 
+def test_malformed_and_missing_source_can_backfill_without_losing_legacy_treatments():
+    responses = iter([
+        {**PROPS, "bgnow": {"last": {}, "mills": ["invalid"]}},
+        {},
+        PROPS,
+    ])
+
+    async def handle(request):
+        if request.path == "/api/v1/status.json":
+            return web.json_response({"settings": {}})
+        if request.path == "/api/v1/treatments.json":
+            return web.json_response(TREATMENTS)
+        if request.path == "/api/v2/properties/bgnow":
+            return web.json_response({"bgnow": PROPS["bgnow"]})
+        assert request.path.startswith("/api/v2/properties/")
+        return web.json_response(next(responses))
+
+    async def exercise(client):
+        await client.async_get_status()
+        return [await client.async_get_data() for _ in range(3)]
+
+    malformed, empty, restored = asyncio.run(_v3_server(handle, exercise, credential=None))
+    for poll in (malformed, empty, restored):
+        assert [row.uid for row in poll.treatments] == ["t1", "t2", "t3", "t4", "t5"]
+    assert malformed.glucose is None and malformed.glucose_time is None
+    assert malformed.iob == 1.35 and malformed.forecast
+    for poll in (malformed, empty):
+        assert poll.forecast_source_time is None
+        assert poll.forecast_at(15) is None and poll.forecast_at(30) is None
+    assert restored.forecast_source_time == datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+    assert restored.forecast_at(15).mgdl == 169 and restored.forecast_at(30).mgdl == 175
+
+
+def test_valid_v3_sgv_does_not_invent_a_missing_v2_forecast_source():
+    fixture = _V3Fixture()
+    anchor = PROPS["bgnow"]["mills"]
+    fixture.entry_rows = [{"type": "sgv", "date": anchor + 2_000, "sgv": 163}]
+
+    async def handle(request):
+        if "," in request.path:
+            return web.json_response({**PROPS, "bgnow": ["invalid"]})
+        return await fixture.handle(request)
+
+    _, data = asyncio.run(_v3_server(handle, _configured_data))
+    assert data.glucose == 163 and data.glucose_time == api._ms_to_dt(anchor + 2_000)
+    assert data.forecast_source_time is None and data.forecast
+    assert data.forecast_at(15) is None and data.forecast_at(30) is None
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(401, api.NightscoutAuthError), (403, api.NightscoutAuthError),
+     (503, api.NightscoutConnectionError), (200, api.NightscoutConnectionError)],
+)
+def test_optional_recovery_does_not_hide_full_v2_poll_failure(status, error):
+    fixture = _V3Fixture()
+
+    async def handle(request):
+        if "," in request.path:
+            if status == 200:
+                return web.json_response([PROPS])
+            return web.Response(status=status)
+        return await fixture.handle(request)
+
+    with pytest.raises(error, match="properties"):
+        asyncio.run(_v3_server(handle, _configured_data))
+    assert _V3_ENTRIES not in [path for path, _ in fixture.calls]
+    assert _V3_TREATMENTS not in [path for path, _ in fixture.calls]
+
+
 def test_v3_uses_newest_usable_sgv_and_keeps_computed_property_clock():
     fixture = _V3Fixture()
     anchor = PROPS["bgnow"]["mills"]
@@ -515,7 +648,10 @@ def test_selected_v3_denied_or_unavailable_reads_do_not_downgrade(status):
     assert "/api/v1/treatments.json" not in [path for path, _ in fixture.calls]
 
 
-@pytest.mark.parametrize("envelope", [{}, {"status": 403, "result": []}, {"status": 200, "result": {}}])
+@pytest.mark.parametrize(
+    "envelope", [{}, {"status": 403, "result": []}, {"status": 200, "result": {}},
+                 {"status": 200, "result": [None]}],
+)
 def test_v3_requires_the_collection_envelope(envelope):
     fixture = _V3Fixture()
 

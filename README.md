@@ -145,6 +145,8 @@ A v3 glucose reading ahead of Home Assistant's clock is shown only if it is less
 
 The v2 poll reads `/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal` in both modes. Treatment reads preserve the five-minute calendar duration when a treatment has no duration and use the most recent nonzero past treatment for each intake sensor. Calendar range requests check the site's longest applicable numeric treatment duration so they can include events that started before the displayed range. If a range read fails or reaches the legacy result cap, the calendar uses the last successful poll's treatments. The compatibility checks in the table link to the test cases and baseline controls.
 
+The v3 treatment reader accepts carbs, insulin and duration as finite JSON numbers. If a quantity is malformed, the event and its other fields remain available. V1 continues to accept numeric strings for these fields.
+
 The existing forecast policy selects a point within three minutes of each horizon and evaluates the two horizons independently. The offline Home Assistant baseline exercised both forecast values, either horizon becoming `unknown`, and a shifted reading time. It also records a deliberate comparison difference: the frozen synthetic contract expects `unknown` for off-grid points that the released integration accepts within its tolerance. Both horizons were reported `unknown` on an existing site. The cause there remains unverified. [Home Assistant forecast baseline][v3-check-ha-forecast]
 
 [v3-check-setup]: https://github.com/aperetti/ha-nightscout-extended/blob/a8acabe41d6380f6647f9863c37bc9d776ffc9cc/tests_ha/test_integration.py#L32-L104

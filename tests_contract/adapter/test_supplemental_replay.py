@@ -56,6 +56,7 @@ THRESHOLD_KEYS = {
     "bg_target_bottom": "bgTargetBottom", "bg_low": "bgLow",
 }
 CALENDAR_PAGE_CAP = 2
+SGV_ROUTES = frozenset({"entries1", "entries3"})
 
 
 def _data():
@@ -132,6 +133,9 @@ class SupplementalReplay:
         self.channel = "entry"
         self.active_bearers = set()
         self.exchange_replies = {}
+        self.sgv_inventory = {}
+        self.sgv_versions = {}
+        self.sgv_write_clock = 0
 
     def set_step(self, case_id, step, request):
         self.planned = list(
@@ -147,6 +151,45 @@ class SupplementalReplay:
         self.calls.clear()
         self.errors.clear()
         self.reached = set()
+        self.sgv_writes = self._advance_sgv_inventory()
+
+    def _advance_sgv_inventory(self):
+        # These named lists are the fixture's stored inventory for a phase.
+        # Only an explicit inventory change writes a mock storage revision.
+        snapshots = {
+            payload for route, _, payload in self.planned
+            if route in SGV_ROUTES and payload in DATA["lists"]
+        }
+        if not snapshots:
+            return 0
+        if len(snapshots) != 1:
+            raise ValueError("a supplemental phase must specify one SGV inventory")
+        snapshot = {}
+        for record_id in DATA["lists"][next(iter(snapshots))]:
+            row = document(record_id, DATA["records"], "v3")
+            if row.get("type") != "sgv":
+                continue
+            identity = row["identifier"]
+            if identity in snapshot and snapshot[identity] != record_id:
+                raise ValueError("conflicting SGV representations in one fixture inventory")
+            snapshot[identity] = record_id
+
+        updated = {
+            key for key, record_id in snapshot.items()
+            if self.sgv_inventory.get(key) != record_id
+        }
+        deleted = self.sgv_inventory.keys() - snapshot.keys()
+        if updated or deleted:
+            self.sgv_write_clock = max(self.sgv_write_clock + 1, epoch(self.request["clock"]))
+        for key in updated:
+            row = document(snapshot[key], DATA["records"], "v3")
+            self.sgv_versions[key] = {**row, "srvModified": self.sgv_write_clock}
+        for key in deleted:
+            self.sgv_versions[key] = {
+                **self.sgv_versions[key], "isValid": False, "srvModified": self.sgv_write_clock,
+            }
+        self.sgv_inventory = snapshot
+        return len(updated) + len(deleted)
 
     def _auth(self, request):
         query = {key: request.query.getall(key) for key in ("token",) if key in request.query}
@@ -343,6 +386,95 @@ class SupplementalReplay:
         call["fixture"] = "companion:empty-collection"
         return _json_response({"status": 200, "result": []} if wire == "3" else [])
 
+    def _authorize_entries(self, wire, auth, call):
+        if wire == "3" and auth not in self.active_bearers:
+            call["fixture"] = "rejected:v3-authorization"
+            return None, (401, {}, 0, b"{}")
+        routes = {"entries" + wire}
+        source = self._planned(routes, auth)
+        if source is not None and source[2] in DATA["faults"]:
+            return source, self._respond_planned(source, call)
+        if source is None and self._planned(routes) is not None:
+            call["fixture"] = "rejected:fixture-authorization"
+            return None, (401, {}, 0, b"{}")
+        return source, None
+
+    def _sgv_range(self, wire, request, auth, call):
+        call["route"] = f"v{wire}/entries"
+        source, refusal = self._authorize_entries(wire, auth, call)
+        if refusal is not None:
+            return refusal
+        query = request.query
+        if wire == "3":
+            if query.get("type") != "sgv" or query.get("sort") != "date":
+                return 400, {}, 0, b"{}"
+            lower, upper = int(query["date$gte"]), int(query["date$lt"])
+            limit, skip = int(query["limit"]), int(query["skip"])
+        else:
+            if query.get("find[type]") != "sgv":
+                return 400, {}, 0, b"{}"
+            lower, upper = int(query["find[date][$gte]"]), int(query["find[date][$lt]"])
+            limit, skip = int(query["count"]), 0
+        if lower >= upper or limit <= 0 or skip < 0:
+            return 400, {}, 0, b"{}"
+        rows = []
+        for identity, record_id in self.sgv_inventory.items():
+            row = self.sgv_versions[identity] if wire == "3" else document(
+                record_id, DATA["records"], "v1",
+            )
+            stamp = row.get("date")
+            if type(stamp) is int and lower <= stamp < upper and row.get("isValid") is not False:
+                rows.append((stamp, identity, row))
+        rows.sort(key=lambda item: item[:2], reverse=wire == "1")
+        page = [row for _, _, row in rows[skip:skip + limit]]
+        if source is not None:
+            self.reached.add(source)
+        call.update(
+            fixture="ranged:frozen-SGV-inventory", lower=lower, upper=upper,
+            limit=limit, skip=skip, returned=len(page), fixture_writes=self.sgv_writes,
+        )
+        return _json_response({"status": 200, "result": page} if wire == "3" else page)
+
+    def _sgv_history(self, path, request, auth, call):
+        call["route"] = "v3/entries/history"
+        source, refusal = self._authorize_entries("3", auth, call)
+        if refusal is not None:
+            return refusal
+        since = int(path.rsplit("/", 1)[-1])
+        limit = int(request.query["limit"])
+        if since < 0 or limit <= 0:
+            return 400, {}, 0, b"{}"
+        versions = sorted(
+            (row for row in self.sgv_versions.values() if row["srvModified"] > since),
+            key=lambda row: (row["srvModified"], row["identifier"]),
+        )
+        page = versions[:limit]
+        if source is not None:
+            self.reached.add(source)
+        call.update(
+            fixture="ranged:frozen-SGV-storage-versions", since=since, limit=limit,
+            returned=len(page), fixture_writes=self.sgv_writes,
+        )
+        return _json_response({"status": 200, "result": page})
+
+    def _sgv_fence(self, auth, call):
+        call["route"] = "v3/lastModified"
+        if auth not in self.active_bearers:
+            call["fixture"] = "rejected:v3-authorization"
+            return 401, {}, 0, b"{}"
+        # The collection marker is a hint. The server-side fence is its wall
+        # clock after the stored changes already visible in SEARCH.
+        wall = max(epoch(self.request["clock"]), self.sgv_write_clock)
+        hint = max(
+            (row["date"] for row in self.sgv_versions.values() if type(row.get("date")) is int),
+            default=0,
+        )
+        call.update(fixture="companion:SGV-change-fence", server_clock=wall)
+        return _json_response({
+            "status": 200,
+            "result": {"srvDate": wall, "collections": {"entries": max(hint, self.sgv_write_clock)}},
+        })
+
     def _collection(self, path, request, auth, call):
         version, collection = path.split("/")[2:]
         stem = "entries" if collection == "entries" else "treatments"
@@ -420,6 +552,14 @@ class SupplementalReplay:
         if path.startswith("/api/v2/properties/"):
             return self._properties(set(path.rsplit("/", 1)[-1].split(",")), call)
         canonical = path.removesuffix(".json")
+        if canonical == "/api/v1/entries" and "find[date][$lt]" in request.query:
+            return self._sgv_range("1", request, auth, call)
+        if path == "/api/v3/entries" and "date$lt" in request.query:
+            return self._sgv_range("3", request, auth, call)
+        if path.startswith("/api/v3/entries/history/"):
+            return self._sgv_history(path, request, auth, call)
+        if path == "/api/v3/lastModified":
+            return self._sgv_fence(auth, call)
         if canonical in {"/api/v1/treatments", "/api/v3/treatments", "/api/v3/entries"}:
             return self._collection(canonical, request, auth, call)
         call["fixture"] = "rejected:unsupported-replay-route"
@@ -434,7 +574,7 @@ class SupplementalReplay:
             "query_keys": sorted({
                 key for key in request.query
                 if key.startswith(("date$", "created_at$", "find[", "sort[0]["))
-                or key in {"limit", "skip", "count", "type", "sort$desc", "sort[duration]", "duration$gt"}
+                or key in {"limit", "skip", "count", "type", "sort", "sort$desc", "sort[duration]", "duration$gt"}
             }),
         }
         self.calls.append(call)
@@ -476,6 +616,7 @@ def _render(event):
 def _product_policy(case_id, index, actual, expected, wire, entry_state):
     """Separate release behavior checks from the unaltered H1 comparisons."""
     failures = []
+    acquisition_routes = {"v3/entries", "v3/entries/history"}
 
     def require(condition, explanation):
         if not condition:
@@ -489,6 +630,20 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
 
     def calls(route):
         return [call for call in wire if call["route"] == route]
+
+    def v3_entries():
+        return [call for call in wire if call["route"] in acquisition_routes]
+
+    def successful_entries():
+        reads = v3_entries()
+        return (
+            all(call["status"] == 200 for call in reads)
+            and [call["route"] for call in reads] in [
+                ["v3/entries"],
+                ["v3/entries/history"],
+                ["v3/entries", "v3/entries/history"],
+            ]
+        )
 
     def sensor(role, *, omit_timestamp=False):
         value = actual[role]
@@ -512,8 +667,8 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
     elif case_id in {"A-V3-RENEW", "A-V3-REVOKED"}:
         sensor("glucose")
         auth_trace = [
-            (call["route"], call["status"]) for call in wire
-            if call["route"] in {"v3/entries", "exchange"}
+            ("exchange" if call["route"] == "exchange" else "v3/entries", call["status"])
+            for call in wire if call["route"] in acquisition_routes or call["route"] == "exchange"
         ]
         if index == 2:
             reactive = [("v3/entries", 401), ("exchange", 200), ("v3/entries", 200)]
@@ -526,15 +681,15 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
     elif case_id == "A-V3-SUBJECT-FAILURES":
         if index < 3:
             compare([401], [c["status"] for c in calls("exchange")], "failed subject exchange")
-            require(not calls("v3/entries") and entry_state == "loaded", "legacy proof permits legacy fallback")
+            require(not v3_entries() and entry_state == "loaded", "legacy proof permits legacy fallback")
             glucose = actual["glucose"]
             require(glucose is not None and glucose[3] == "unknown", "permissive legacy replay has no glucose")
         else:
             sensor("glucose")
-            compare([200], [c["status"] for c in calls("v3/entries")], "recovered v3 entries")
+            require(successful_entries(), "recovery performs a successful bounded acquisition")
     elif case_id == "A-V3-FORBIDDEN":
         if index == 1:
-            compare([403], [c["status"] for c in calls("v3/entries")], "protected denial")
+            compare([403], [c["status"] for c in v3_entries()], "protected denial")
             require(len(calls("exchange")) == 1 and not calls("v1/treatments"),
                     "protected 403 causes neither renewal nor legacy downgrade")
             require(entry_state == "setup_error" and actual["glucose"] is None,
@@ -546,11 +701,11 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
         if actual["glucose"] is not None:
             attributes = actual["glucose"][4]
             if case_id == "G-PUBLIC-DELTA":
-                require(not calls("v3/entries"), "public legacy reads its raw V2 computed delta")
+                require(not v3_entries(), "public legacy reads its raw V2 computed delta")
                 compare((17, 17, -17, None, 10, None, 0)[index - 1],
                         attributes.get("delta"), "legacy delta in mg/dL")
             else:
-                compare([200], [c["status"] for c in calls("v3/entries")], "protected entries")
+                require(successful_entries(), "v3 performs a successful bounded acquisition")
                 require(attributes.get("delta") is None, "no V2 delta can be used without an agreeing V2 reading")
     elif case_id == "D-CALCULATED":
         for role in ("iob", "cob", "basal"):
@@ -841,6 +996,7 @@ async def _run_supplemental(case_id, freezer, hass_storage, tmp_path, *, integra
                 "scope": REPLAY_CASES[case_id], "setup_state": observer.entry_state,
                 "lifecycle": request["lifecycle"], "observed": actual,
                 "observer_reloaded": replay.interface_reload,
+                "sgv_fixture_writes": replay.sgv_writes,
                 "differences": mismatches, "wire": replay.calls,
                 "product_policy_failures": policy,
                 "declared_release_deltas": declared,
