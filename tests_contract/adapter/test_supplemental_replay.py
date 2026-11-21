@@ -666,15 +666,27 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
         require(entry_state == "loaded", "the version probe permits real HA setup")
     elif case_id in {"A-V3-RENEW", "A-V3-REVOKED"}:
         sensor("glucose")
-        auth_trace = [
-            ("exchange" if call["route"] == "exchange" else "v3/entries", call["status"])
-            for call in wire if call["route"] in acquisition_routes or call["route"] == "exchange"
-        ]
         if index == 2:
-            reactive = [("v3/entries", 401), ("exchange", 200), ("v3/entries", 200)]
-            proactive = [("exchange", 200), ("v3/entries", 200)]
-            alternatives = [reactive] if case_id == "A-V3-REVOKED" else [reactive, proactive]
-            require(auth_trace in alternatives, "a single renewal is followed by a successful read")
+            trace = [
+                (call["route"], call["auth"], call["status"])
+                for call in wire if call["route"] in acquisition_routes or call["route"] == "exchange"
+            ]
+            exchanges = [offset for offset, item in enumerate(trace) if item[0] == "exchange"]
+            require(len(exchanges) == 1, "exactly one credential-free renewal is attempted")
+            if len(exchanges) == 1:
+                pivot = exchanges[0]
+                require(trace[pivot] == ("exchange", "none", 200),
+                        "renewal succeeds without forwarding the original bearer")
+                before, after = trace[:pivot], trace[pivot + 1:]
+                paths = [route for route, _, _ in after]
+                require(
+                    paths in [["v3/entries"], ["v3/entries/history"], ["v3/entries", "v3/entries/history"]]
+                    and all(auth == "current" and status == 200 for _, auth, status in after),
+                    "the renewed bearer completes one read or the ordered SEARCH then HISTORY sequence",
+                )
+                if before or case_id == "A-V3-REVOKED":
+                    require(bool(paths) and before == [(paths[0], "old", 401)],
+                            "revoked bearer gets exactly one 401 before retrying the same route")
         else:
             require(len(calls("exchange")) == (1 if index == 1 else 0),
                     "the first load exchanges once and the unchanged next poll uses its cached bearer")
@@ -713,8 +725,7 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
         if index == 4:
             require(any(c["status"] == 503 for c in calls("properties")),
                     "the upstream fault makes exposed calculated sensors unavailable")
-        else:
-            compare(expected["site_settings"], actual["site_settings"], "site settings")
+        compare(expected["site_settings"], actual["site_settings"], "site settings")
     elif case_id == "D-SETTINGS-ONLY":
         compare(expected["site_settings"], actual["site_settings"], "site settings")
         require(any(c["status"] == 200 for c in calls("v1/status")), "site settings came from native status reads")
@@ -889,9 +900,6 @@ def _compatible_expectation(case_id, step, frozen_expected):
             sense = frozen_expected[field]
             replace(field, [*sense[:2], None, sense[3], {}],
                     "the released HA calculated sensor exposes no source timestamp")
-        if step == 4:
-            replace("site_settings", None,
-                    "the public glucose state does not expose settings while wholly unavailable")
     elif case_id == "F-AR2-MIXED":
         quantities = ((207, 231), (301, 231), (207, 231), (207, 330))[step - 1]
         for role, quantity in zip(("forecast_15", "forecast_30"), quantities, strict=True):
