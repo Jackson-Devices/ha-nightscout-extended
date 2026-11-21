@@ -31,6 +31,7 @@ CONTRACT = ROOT / "tests_contract" / "contract" / "run.py"
 ADAPTER = "tests_contract/adapter/test_upstream_checks.py"
 POSITIVE_NODE = f"{ADAPTER}::test_upstream_setup_and_lifecycle"
 CONTRACT_NODE = f"{ADAPTER}::test_frozen_contract"
+FORECAST_MODULE = "tests_contract/adapter/test_forecast_compatibility.py"
 PYTEST_HA = ["-q", "-c", "tests_ha/pytest.ini", "-p", "no:cacheprovider"]
 
 
@@ -117,7 +118,10 @@ def core(args, results):
                 outcome.update(status="infrastructure_failure", error="Expected control diagnostic missing")
         results.append(outcome)
 
-    results.append(step(args.output, "ha-positive", [ha, "-m", "pytest", POSITIVE_NODE, *PYTEST_HA], pytest=True))
+    results.append(step(
+        args.output, "ha-positive",
+        [ha, "-m", "pytest", POSITIVE_NODE, FORECAST_MODULE, *PYTEST_HA], pytest=True,
+    ))
     observer = step(
         args.output, "ha-contract", [ha, "-m", "pytest", CONTRACT_NODE, *PYTEST_HA], pytest=True, baseline=True,
     )

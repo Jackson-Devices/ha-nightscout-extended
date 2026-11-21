@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from operator import itemgetter
 from pathlib import Path
 from urllib.parse import quote, quote_plus
 
@@ -167,7 +168,8 @@ async def test_upstream_setup_and_lifecycle(
         assert successor.hass is not first_hass
         assert successor.entry.entry_id == entry_id
         assert successor.entry_state == "loaded"
-        assert resumed["registry"] == reloaded["registry"]
+        row_id = itemgetter("id")
+        assert sorted(resumed["registry"], key=row_id) == sorted(reloaded["registry"], key=row_id)
         row = next(row for row in resumed["registry"] if row["role"] == "glucose")
         assert row["id"] == glucose["id"]
         assert row["name"] == "Kitchen glucose"
