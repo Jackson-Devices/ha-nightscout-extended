@@ -36,10 +36,12 @@
       "init": {
         "data": {
           "scan_interval": "Update interval",
-          "sgv_history_days": "Local glucose history"
+          "sgv_history_days": "Local glucose history",
+          "reservoir_uploader": "Reservoir uploader"
         },
         "data_description": {
-          "sgv_history_days": "Keep 1 to 30 days of raw readings locally. Larger windows use more storage and take longer to sync. Older dates are fetched on demand when Nightscout is reachable."
+          "sgv_history_days": "Keep 1 to 30 days of raw readings locally. Larger windows use more storage and take longer to sync. Older dates are fetched on demand when Nightscout is reachable.",
+          "reservoir_uploader": "Enter the exact Nightscout device label for your AAPS uploader. Leave blank to use the saved or uniquely discovered uploader."
         }
       }
     },
@@ -75,6 +77,9 @@
       },
       "iob": {
         "name": "Insulin on board"
+      },
+      "insulin_remaining": {
+        "name": "Insulin remaining"
       },
       "cob": {
         "name": "Carbs on board"

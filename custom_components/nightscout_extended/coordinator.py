@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -17,15 +18,27 @@ from .api import (
     NightscoutClient,
     NightscoutConnectionError,
     NightscoutData,
+    ReservoirReading,
     _apply_v3_glucose,
 )
-from .const import CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DEFAULT_THRESHOLDS_MGDL, DOMAIN
+from .const import (
+    CONF_RESERVOIR_UPLOADER,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_THRESHOLDS_MGDL,
+    DOMAIN,
+)
 from .sgv_history import SGVHistory
 
 _LOGGER = logging.getLogger(__name__)
 _READ_ERRORS = (NightscoutAuthError, NightscoutConnectionError)
 
 type NightscoutConfigEntry = ConfigEntry[NightscoutCoordinator]
+
+
+def reservoir_binding_store(hass: HomeAssistant, entry_id: str) -> Store[dict[str, str]]:
+    """Keep the one-time uploader selection private and tied to the config entry."""
+    return Store(hass, 1, f"{DOMAIN}.reservoir.{entry_id}", private=True, atomic_writes=True)
 
 
 class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
@@ -56,6 +69,8 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         self._poll_lock = asyncio.Lock()
         self.units = units
         self.status: dict = {}
+        self._reservoir_binding = reservoir_binding_store(hass, entry.entry_id)
+        self._reservoir_uploader: str | None = None
 
     @property
     def thresholds_mgdl(self) -> dict[str, float]:
@@ -143,4 +158,37 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         elif self.data is not None:
             # Retain the previous successful range for the calendar's independent fallback.
             data.treatments = self.data.treatments
+        try:
+            data.reservoir = await self._async_get_reservoir(now)
+        except (NightscoutAuthError, NightscoutConnectionError, HomeAssistantError, OSError):
+            # A device-status permission, response or storage failure is local to the reservoir.
+            data.reservoir = None
         return data
+
+    async def _async_get_reservoir(self, poll_time: datetime) -> ReservoirReading | None:
+        explicit = self.config_entry.options.get(CONF_RESERVOIR_UPLOADER)
+        if explicit:
+            return await self.client.async_get_reservoir(poll_time, explicit)
+
+        if self._reservoir_uploader is None:
+            saved = await self._reservoir_binding.async_load()
+            if saved is not None:
+                device = saved.get("device") if isinstance(saved, dict) else None
+                if not isinstance(device, str) or not device.strip():
+                    return None
+                self._reservoir_uploader = device
+
+        reading = await self.client.async_get_reservoir(poll_time, self._reservoir_uploader)
+        if reading is None or self._reservoir_uploader is not None:
+            return reading
+        if self.hass.is_stopping:
+            return None
+
+        # Store handles certain write errors internally. Read back a new Store
+        # instance so an in-memory pending write cannot enable automatic selection.
+        binding = {"device": reading.uploader}
+        await self._reservoir_binding.async_save(binding)
+        if await reservoir_binding_store(self.hass, self.config_entry.entry_id).async_load() != binding:
+            return None
+        self._reservoir_uploader = reading.uploader
+        return reading

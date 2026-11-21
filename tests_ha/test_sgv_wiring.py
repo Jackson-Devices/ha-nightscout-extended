@@ -71,6 +71,7 @@ def sites(monkeypatch):
     monkeypatch.setattr(NightscoutClient, "async_get_status", connect)
     monkeypatch.setattr(NightscoutClient, "async_get_data", properties)
     monkeypatch.setattr(NightscoutClient, "async_get_treatments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(NightscoutClient, "async_get_reservoir", AsyncMock(return_value=None))
     monkeypatch.setattr(NightscoutSGVSource, "read_range", read_range)
     monkeypatch.setattr(NightscoutSGVSource, "change_fence", AsyncMock(return_value=READING_MS))
     monkeypatch.setattr(NightscoutSGVSource, "read_changes", AsyncMock(return_value=([], None)))
