@@ -35,9 +35,16 @@
     "step": {
       "init": {
         "data": {
-          "scan_interval": "Update interval"
+          "scan_interval": "Update interval",
+          "sgv_history_days": "Local glucose history"
+        },
+        "data_description": {
+          "sgv_history_days": "Keep 1 to 30 days of raw readings locally. Larger windows use more storage and take longer to sync. Older dates are fetched on demand when Nightscout is reachable."
         }
       }
+    },
+    "error": {
+      "invalid_history_days": "Enter a whole number of days."
     }
   },
   "entity": {

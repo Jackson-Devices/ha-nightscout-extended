@@ -616,12 +616,16 @@ class NightscoutClient:
         return parse_treatments(rows)
 
     async def async_get_data(
-        self, past: timedelta = timedelta(hours=48), ahead: timedelta = timedelta(days=62)
+        self, past: timedelta = timedelta(hours=48), ahead: timedelta = timedelta(days=62),
+        *, calculated_only: bool = False,
     ) -> NightscoutData:
+        """Fetch calculated values, or the standalone combined view by default."""
         props = await self._get(f"/api/v2/properties/{PROPERTIES}")
         if not isinstance(props, dict):
             raise NightscoutConnectionError("Unexpected properties response")
         data = parse_properties(props)
+        if calculated_only:
+            return data
         now = datetime.now(timezone.utc)
         if self._use_v3:
             _apply_v3_glucose(data, await self._v3_glucose(now, data.glucose_time, data.glucose))

@@ -1,0 +1,27 @@
+get_glucose_history:
+  name: Get glucose history
+  description: Read raw Nightscout glucose measurements and coverage for a single site.
+  fields:
+    entity_id:
+      name: Glucose sensor
+      description: The site's primary Nightscout Extended glucose sensor.
+      required: true
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              integration: nightscout_extended
+    start:
+      name: Start
+      description: Inclusive ISO 8601 timestamp with a time zone offset.
+      required: true
+      example: "2026-01-08T12:00:00Z"
+      selector:
+        text:
+    end:
+      name: End
+      description: Exclusive ISO 8601 timestamp with a time zone offset.
+      required: true
+      example: "2026-01-08T13:00:00Z"
+      selector:
+        text:

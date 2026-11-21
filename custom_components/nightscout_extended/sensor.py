@@ -20,8 +20,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from homeassistant.util import dt as dt_util
 
+from . import glucose_unique_id
 from .api import NightscoutData
-
 from .const import UNIT_MMOL
 from .coordinator import NightscoutConfigEntry, NightscoutCoordinator
 from .entity import device_info
@@ -206,13 +206,29 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         entry = coordinator.config_entry
-        self._attr_unique_id = f"{entry.unique_id or entry.entry_id}_{description.key}"
+        self._attr_unique_id = (
+            glucose_unique_id(entry) if description.key == "glucose"
+            else f"{entry.unique_id or entry.entry_id}_{description.key}"
+        )
         if description.glucose:
             # Nightscout reports mg/dL; show the site's own unit, HA converts.
             self._attr_native_unit_of_measurement = MGDL
             self._attr_suggested_unit_of_measurement = MMOL if coordinator.units == UNIT_MMOL else MGDL
             self._attr_suggested_display_precision = 1 if coordinator.units == UNIT_MMOL else 0
         self._attr_device_info = device_info(coordinator)
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        key = self.entity_description.key
+        if key in {"last_carbs", "last_insulin"}:
+            return self.coordinator.treatments_available
+        if key in {"glucose", "glucose_trend", "last_reading"}:
+            return self.coordinator.glucose_available
+        if key == "glucose_delta" and not self.coordinator.glucose_available:
+            return False
+        return self.coordinator.calculations_available
 
     @property
     def native_value(self) -> float | int | str | datetime | None:
@@ -230,5 +246,9 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
         )
         if self.entity_description.key == "glucose":
             # For the bundled card: colour the reading by the site's own alarm levels.
-            attrs = {**(attrs or {}), "thresholds_mgdl": self.coordinator.thresholds_mgdl}
+            attrs = {
+                **(attrs or {}),
+                "thresholds_mgdl": self.coordinator.thresholds_mgdl,
+                "sgv_history_revision": self.coordinator.history.revision,
+            }
         return attrs
