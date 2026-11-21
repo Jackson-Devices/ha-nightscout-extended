@@ -1,7 +1,8 @@
 # Nightscout Extended for Home Assistant
 
 Brings the values Nightscout already calculates into Home Assistant: **insulin on board, carbs on board, the AR2
-glucose forecast**, current basal, and the latest glucose with its trend. Home Assistant's built-in Nightscout
+glucose forecast**, current basal, and the latest glucose with its trend. It also makes Nightscout's measured
+glucose history available to Home Assistant dashboards and actions. Home Assistant's built-in Nightscout
 integration only provides glucose. This one can run alongside it.
 
 > [!WARNING]
@@ -20,8 +21,8 @@ integration only provides glucose. This one can run alongside it.
 | Last reading | timestamp | When the latest CGM value was taken |
 | Insulin on board | U | Nightscout `iob` plugin; attribute `source` (e.g. Care Portal, Loop, OpenAPS) |
 | Carbs on board | g | Nightscout `cob` plugin |
-| Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin |
-| Forecast in 30 minutes | mg/dL or mmol/L | Attribute `forecast` holds the whole predicted curve |
+| Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin with `source_time` and `forecast_time` |
+| Forecast in 30 minutes | mg/dL or mmol/L | Same timestamps, plus the predicted curve in `forecast` |
 | Last carbs | g | Most recent treatment with carbs; attributes `time`, `event_type`, `notes` |
 | Last insulin | U | Most recent treatment with insulin; same attributes |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
@@ -62,9 +63,6 @@ Home Assistant checks calendars for upcoming events every 15 minutes, so a remin
 > treatment's time onwards whether or not they happened, so a planned meal with carbs would show up in COB and the
 > forecast if it's skipped.
 
-A sensor shows *unknown* when its Nightscout plugin is off. Enable `iob`, `cob`, `ar2` and `basal` in Nightscout's
-`ENABLE` setting to get them all.
-
 ## Glucose card
 
 The integration comes with a glanceable glucose display for a kitchen tablet, a bedside screen or any dashboard.
@@ -82,7 +80,7 @@ name: Sam
 - **Big reading, trend arrow and change**, with how long ago it was taken and a bar that empties as it gets older.
 - **Coloured by your Nightscout alarm levels** (`BG_LOW`, `BG_TARGET_BOTTOM`, `BG_TARGET_TOP`, `BG_HIGH`): urgent
   low, low, in range, high, urgent high. Grey with a warning once there's been no reading for 15 minutes.
-- **Chart behind the number**: recent readings, the target range, and the AR2 forecast as a dotted line.
+- **Chart behind the number**: measured Nightscout history with gaps, the target range, and the AR2 forecast as a dotted line.
 - **Night mode** from 21:00 to 07:00 by default.
 - **IOB, COB and the 30-minute forecast** along the bottom.
 - mg/dL or mmol/L, following the sensor's unit.
@@ -99,7 +97,7 @@ It finds the integration's sensors itself; set `entity` if you have more than on
 | `show_chart`, `show_footer`, `show_clock` | `true` | Turn parts off |
 | `night_mode` | `true` | Dim to coloured text on black at night |
 | `night_start`, `night_end` | `21`, `7` | Night hours (0–23) |
-| `stale_minutes` | `15` | Minutes without a reading before the card turns grey |
+| `stale_minutes` | `15` | Reading age at which the card turns grey. Also limits forecast source age and how far apart chart points can be connected. |
 
 For a full-screen display, put the card alone in a **panel** view and set `fill_screen: true`.
 
@@ -122,7 +120,9 @@ Restart Home Assistant, then go to **Settings → Devices & services → Add int
   **readable** role and paste it here. The API secret works too, but it gives full write access, so a read-only
   token is safer. Leave it empty if your site is publicly readable.
 
-The update interval (default 60 s) can be changed under the integration's **Configure** button.
+Under the integration's **Configure** button, set **Update interval** (30–900 seconds, default 60) and
+**Local glucose history** (1–30 whole days, default 1). Longer retention uses more local storage and takes
+longer to sync. The update interval controls when Home Assistant checks for data.
 
 ### Nightscout API compatibility
 
@@ -134,20 +134,19 @@ Home Assistant reads Nightscout independently of the API used by your uploader. 
 | Home Assistant behavior | Legacy reads | Reads with v3 enabled | Compatibility check |
 |---|---|---|---|
 | Setup, reauthentication, site title, units and alarm thresholds | `/api/v1/status.json` and `/api/v2/properties/bgnow` to validate access | Same site metadata and access validation, plus the v3 version check and token exchange | [Setup and identity][v3-check-setup], [renewal and denied reads][v3-check-auth] |
-| Glucose and last reading | The v2 properties poll's `bgnow` value and time | `/api/v3/entries` supplies the newest usable glucose record and its time | [Glucose selection and units][v3-check-glucose] |
+| Glucose and last reading | The v2 properties poll's `bgnow` value and time when available | Newest usable measurement and its original time from locally retained v3 readings | [Glucose selection and units][v3-check-glucose] |
+| Ordered glucose history | Bounded `/api/v1/entries.json` reads reconcile the retained window | Bounded `/api/v3/entries` reads plus changes from `/api/v3/entries/history/<cursor>` | [History action tests](tests_ha/test_sgv_ingestion.py) |
 | Glucose change and trend | v2 `delta` and `direction` properties | Keep the v2 change and trend when its glucose value and timestamp agree with the v3 reading. Otherwise use the v3 reading's direction if present and leave the change unknown. | [Delta with delayed readings][v3-check-glucose], [Client parity tests](tests/test_api.py) |
 | Insulin on board, carbs on board, and current basal | v2 `iob`, `cob`, and `basal` properties | Same computed values and available source attributes | [Calculated properties and settings][v3-check-derived] |
 | 15- and 30-minute AR2 forecasts, and chart points | v2 `ar2.forecast.predicted`, timed from the v2 `bgnow` reading | Same forecast, using its v2 reading time even when the v3 glucose clock differs | [Home Assistant forecast baseline][v3-check-ha-forecast], [synthetic forecast comparison][v3-check-forecast] |
 | Last carbs, last insulin and treatments calendar | `/api/v1/treatments.json` filtered by `created_at` | `/api/v3/treatments` combines bounded pages for `date` and `created_at` to include older records | [Legacy treatments, paging, and calendar boundaries][v3-check-treatments] |
-| Dashboard card and diagnostics | Home Assistant entities and recorder history for the card, v1 site status and value presence for diagnostics | Same consumers and site settings. The card continues to read history from Home Assistant. | [Home Assistant integration tests][v3-check-setup] |
+| Dashboard card and diagnostics | Home Assistant entities and `get_glucose_history` for the card, v1 site status and value presence for diagnostics | Same action, entities, and site settings | [Home Assistant integration tests][v3-check-setup] |
 
 A v3 glucose reading ahead of Home Assistant's clock is shown only if it is less than 60 seconds ahead and has the same timestamp and glucose value as Nightscout's current v2 `bgnow` reading. Its original timestamp is preserved.
 
 The v2 poll reads `/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal` in both modes. Treatment reads preserve the five-minute calendar duration when a treatment has no duration and use the most recent nonzero past treatment for each intake sensor. Calendar range requests check the site's longest applicable numeric treatment duration so they can include events that started before the displayed range. If a range read fails or reaches the legacy result cap, the calendar uses the last successful poll's treatments. The compatibility checks in the table link to the test cases and baseline controls.
 
 The v3 treatment reader accepts carbs, insulin and duration as finite JSON numbers. If a quantity is malformed, the event and its other fields remain available. V1 continues to accept numeric strings for these fields.
-
-The existing forecast policy selects a point within three minutes of each horizon and evaluates the two horizons independently. The offline Home Assistant baseline exercised both forecast values, either horizon becoming `unknown`, and a shifted reading time. It also records a deliberate comparison difference: the frozen synthetic contract expects `unknown` for off-grid points that the released integration accepts within its tolerance. Both horizons were reported `unknown` on an existing site. The cause there remains unverified. [Home Assistant forecast baseline][v3-check-ha-forecast]
 
 [v3-check-setup]: https://github.com/aperetti/ha-nightscout-extended/blob/a8acabe41d6380f6647f9863c37bc9d776ffc9cc/tests_ha/test_integration.py#L32-L104
 [v3-check-auth]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L244-L266
@@ -157,7 +156,58 @@ The existing forecast policy selects a point within three minutes of each horizo
 [v3-check-forecast]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L293-L306
 [v3-check-treatments]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L307-L318
 
-## Example: forecast chart
+## Glucose history
+
+A poll may find zero, one, or many new or revised readings. A quiet poll leaves existing readings and their
+timestamps unchanged. The v3 server's write timestamp tracks which changes Home Assistant has read, including
+late uploads with older measurement times. Repeated reads use the site's stable record ID to avoid duplicates,
+and distinct IDs can share a timestamp. Late readings fill the chart at their original times while the current
+glucose sensor continues to show the latest usable reading.
+
+The bundled card uses the history action and shows gaps where coverage is missing or measurements are far
+apart. Backfilled readings appear in this chart and in history action results. Home Assistant Recorder and
+automations continue to receive live entity updates only, without retroactive state changes or trigger replay.
+
+Use the site's primary **Glucose** sensor. The caller needs permission to read that entity. The range
+includes the start and excludes the end. Supply ISO 8601 timestamps with an offset.
+
+```yaml
+- action: nightscout_extended.get_glucose_history
+  data:
+    entity_id: sensor.nightscout_glucose
+    start: "2026-01-08T12:00:00+00:00"
+    end: "2026-01-08T13:00:00+00:00"
+  response_variable: glucose_history
+```
+
+- `readings` contains `id`, `date` (UTC epoch milliseconds), `sgv` (a number in mg/dL), and `direction`
+  (a string or null), sorted by measurement time and ID. `unit` is always `mg/dL`.
+- `status` is `complete` when the full range was checked, even if it contains no readings. `partial` means
+  some of the range is known. `unavailable` means none of the requested range could be verified.
+- `missing_ranges` lists uncovered intervals as `{start, end}` in UTC epoch milliseconds. `as_of` is
+  the oldest coverage check used in the response (an ISO UTC timestamp or null).
+
+Committed local history stays readable during an outage. Home Assistant asks Nightscout for uncovered
+dates on demand. Recently fetched ranges can be reused briefly in memory and do not extend local retention.
+V3 applies recorded soft deletes through the change feed. A later complete range check can detect hard
+deletes or older uploads absent from that feed. V1 checks the retained range on each poll. Server limits
+or missing raw-read permission can leave gaps, even when a legacy current glucose reading is available.
+Recovery depends on records Nightscout makes available.
+
+## Forecasts and missing values
+
+Both horizons use Nightscout's AR2 forecast, anchored to its v2 `bgnow` reading even when the latest v3
+reading has a different time. `source_time` is the anchor time and `forecast_time` is the selected point's
+time. Both are UTC timestamps when known. Each horizon is `unknown` independently if there is no usable
+point within three minutes of its target. A missing optional calculation can leave its sensor `unknown`
+while other data stays available. A failed data request can make its affected sensors `unavailable`, and
+a site-wide outage makes the loaded sensors `unavailable` until polling succeeds again.
+
+A repeated older reading or curve keeps its original timestamps. The card omits expired forecast points
+and hides stale forecasts using `stale_minutes`. The forecast sensors use the site's display unit, and
+the chart attribute's `mgdl` values stay in mg/dL.
+
+### Example: forecast chart
 
 The `forecast` attribute is a list of `{time, mgdl}` points, which you can plot with e.g. ApexCharts card:
 
