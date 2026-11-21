@@ -319,28 +319,34 @@ def raw_characterization(exit_code, output, launch_error):
         row["category"] = "collection_error"
     elif launch_error or exit_code not in (0, 1) or errors or harness_errors:
         row["category"] = "infrastructure_failure"
-    elif (exit_code, row["passed"], row["failed"], row["skipped"], len(mismatches), len(markers)) == (1, 1, 12, 0, 12, 12):
+    elif len(markers) == len(mismatches) and complete_raw_comparison(row):
         row["category"] = "historical_raw_comparison"
     else:
         row["category"] = "unexpected_raw_result"
     return row
 
 
-def raw_ok(row):
-    if not isinstance(row, dict) or row.get("gating") is not False or row.get("category") != "historical_raw_comparison":
+def complete_raw_comparison(row):
+    passed, failed = row.get("passed"), row.get("failed")
+    if type(passed) is not int or type(failed) is not int or min(passed, failed) < 0:
         return False
     expected = {
-        "exit_code": 1, "passed": 1, "failed": 12, "skipped": 0,
-        "errors": 0, "harness_errors": 0, "comparison_mismatches": 12,
+        "exit_code": 1 if failed else 0, "skipped": 0, "errors": 0,
+        "harness_errors": 0, "comparison_mismatches": failed,
     }
     cases = row.get("mismatch_cases")
     return (
-        row.get("counts_observed") is True
+        passed + failed == len(RAW_CASES) and row.get("counts_observed") is True
         and all(type(row.get(key)) is int and row[key] == value for key, value in expected.items())
-        and isinstance(cases, list) and len(cases) == 12 and all(
+        and isinstance(cases, list) and len(cases) == failed and all(
             isinstance(case, str) and case.encode() in RAW_CASES for case in cases
-        ) and len(set(cases)) == 12
+        ) and len(set(cases)) == failed
     )
+
+
+def raw_ok(row):
+    return (isinstance(row, dict) and row.get("gating") is False
+            and row.get("category") == "historical_raw_comparison" and complete_raw_comparison(row))
 
 
 def node_counts(output):
