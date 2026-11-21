@@ -1,0 +1,120 @@
+{
+  "status": "ready_for_handoff_before_daybreak",
+  "host": "Codex Cloud Linux x86_64, glibc 2.41",
+  "branch": "qa/math-review",
+  "reviewed_source": "0cc36588c5316f1f9e112db703504f31095bfeaf",
+  "cold_install_source": "ca17486342e2fdf99debb32abd00ffa24054bfc4",
+  "qa_base": "989c38952eed869fcd323af64daabd9f705a424d",
+  "product": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+  "frozen_suite": "f1a4e7dddf071f2c6d3eb2b27499ee4536d76ab3",
+  "scope": {
+    "code_and_runbook": "12 files added under tests_contract/math_review relative to qa_base",
+    "integration_tree": "matched product",
+    "frozen_files_matched": 5,
+    "existing_release_collector_and_preview_evidence": "byte-identical",
+    "upstream_release": "hold"
+  },
+  "environment": {
+    "first_cold_install": {
+      "commit": "8a1e2ce9e9c3e3173d81fa66bcf1c23b93c973e7",
+      "stage_exit": 2,
+      "uv_exit": 1,
+      "phase": "managed Python download",
+      "cause": "DNS failure"
+    },
+    "repair": "Use the host's approved network transport for the pinned Python and wheel downloads.",
+    "verified_staging": {
+      "cold_exit": 0,
+      "offline_check_exit": 0,
+      "repeat_exit": 0,
+      "empty_state": true,
+      "download_overrides": false,
+      "receipt_unchanged": true
+    },
+    "versions": {
+      "python": "3.14.4",
+      "ha": "2026.10.4",
+      "hypothesis": "6.170.17",
+      "mutmut": "3.8.1",
+      "node": "24.22.3",
+      "uv": "0.13.9",
+      "pytest": "9.0.3",
+      "freezegun": "1.5.5"
+    },
+    "installed_package_counts": {
+      "ha": 153,
+      "mutmut": 161
+    },
+    "math_lock_sha256": "4d53b7af7b90939cd2822b973babfae6bb6e046586a5705177817c28a6235253",
+    "stage_receipt_sha256": "7a867a884257dddf8c19e9f6005fd3a55315f8f60fe28db6f59708b5abbc8bd2",
+    "independent_initial_readiness_receipt_sha256": "8efaaf48b6bd9f27c98a307a3b3f7f6448291c9c4bd199ff9975eaac5aefa73f"
+  },
+  "collection": {
+    "test_projection.py": 19,
+    "test_math_contract.py": 60,
+    "test_native_math.py": 1,
+    "test_ordered_state.py": 6,
+    "total": 86,
+    "fresh_collection_exit": 0,
+    "executed": 0
+  },
+  "fixtures": [
+    "hass",
+    "hass_storage",
+    "freezer",
+    "aioclient_mock",
+    "enable_custom_integrations"
+  ],
+  "runner_checks": {
+    "asyncio": "auto",
+    "imports": "pass",
+    "mutmut_help_in_configured_scratch": "pass",
+    "sqlite_memory": "pass",
+    "london_offsets_s": [
+      3600,
+      0
+    ],
+    "node_json": "pass",
+    "node_history_calls": 0,
+    "native_help": "pass",
+    "native_modules_loaded": 3,
+    "docker": "29.9.2",
+    "compose": "2.40.3",
+    "compose_config": "pass",
+    "containers_started": 0
+  },
+  "mutation_plan": {
+    "named": 11,
+    "unique_preimages": 11,
+    "selectors_verified": 11,
+    "mutmut_selection_count": 12,
+    "state": "PLAN_ONLY",
+    "changed_file_selectors_rechecked": [
+      "card-round-before-band",
+      "card-double-mmol-to-mgdl"
+    ]
+  },
+  "clock_recovery_case": {
+    "prior_observation": "test_projection.py:237 refreshes HA at the same frozen HA time. Advance the HA freezer and supply a fresh reading to cover HA-side expiry and recovery.",
+    "accepted_source": "0cc36588c5316f1f9e112db703504f31095bfeaf",
+    "observed_in_source": [
+      "The original browser-only stale boundary advances 1 ms without changing Home Assistant.",
+      "A separately advanced HA clock drives a real quiet coordinator refresh.",
+      "A subsequent refresh carries a new synthetic SGV ID and timestamp with its matching calculated properties.",
+      "Another refresh removes the 15-minute horizon and retains the 30-minute HA state and card footer."
+    ],
+    "fixture_callers_checked": 6,
+    "review_status": "accepted_for_readiness",
+    "remaining_scope": "The partial case checks +15 loss in HA and the surviving +30 card footer. It does not compare the partial SVG point set."
+  },
+  "unrun_in_this_review": [
+    "numerical assertions",
+    "stateful campaign",
+    "end-to-end native Nightscout comparison",
+    "named and exploratory mutation campaigns",
+    "browser layout",
+    "live-site data",
+    "Daybreak",
+    "upstream pull request or release"
+  ]
+}
