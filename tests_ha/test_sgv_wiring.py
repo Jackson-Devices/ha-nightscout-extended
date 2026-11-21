@@ -125,9 +125,8 @@ async def test_history_permission_is_read_and_specific_to_requested_site(hass, h
 async def test_history_validates_entity_and_bounds_and_survives_site_unload(hass, freezer):
     freezer.move_to(END)
     alpha = _entry(hass)
-    beta = _entry(hass, "Beta")
     await _load(hass, alpha)
-    await _load(hass, beta)
+    await _load(hass, _entry(hass, "Beta"))
     with pytest.raises(ServiceValidationError):
         await _history(hass, "sensor.alpha_glucose_change")
     with pytest.raises(ServiceValidationError):
@@ -145,20 +144,41 @@ async def test_setup_retry_serves_committed_cache_without_network(hass, freezer,
     entry = _entry(hass)
     await _load(hass, entry)
     committed = await _history(hass)
+    cached_start = "2026-01-07T11:59:00+00:00"
+    uncached_start = "2026-01-07T11:58:00+00:00"
+    cached_start_ms = int(datetime.fromisoformat(cached_start).timestamp() * 1000)
+    uncached_start_ms = int(datetime.fromisoformat(uncached_start).timestamp() * 1000)
+    retention_start_ms = int(datetime.fromisoformat("2026-01-07T12:10:00+00:00").timestamp() * 1000)
+
+    prefetched = await _history(hass, start=cached_start)
+    assert prefetched["status"] == "complete"
+    assert prefetched["missing_ranges"] == []
+    assert prefetched["readings"] == committed["readings"]
+    offline_range = AsyncMock(side_effect=NightscoutConnectionError("Fixture range unavailable"))
+    monkeypatch.setattr(NightscoutSGVSource, "read_range", offline_range)
+
+    assert await _history(hass, start=cached_start) == prefetched
+    offline_range.assert_not_awaited()
+
+    extended = await _history(hass, start=uncached_start)
+    assert extended["status"] == "partial"
+    assert extended["readings"] == committed["readings"]
+    assert extended["missing_ranges"] == [{"start": uncached_start_ms, "end": cached_start_ms}]
+    offline_range.assert_awaited_once_with(uncached_start_ms, cached_start_ms)
+
     assert await hass.config_entries.async_unload(entry.entry_id)
     fail = AsyncMock(side_effect=NightscoutConnectionError("Fixture status unavailable"))
-    no_remote = AsyncMock(side_effect=AssertionError("Recovery action tried a remote range"))
     monkeypatch.setattr(NightscoutClient, "async_get_status", fail)
-    monkeypatch.setattr(NightscoutSGVSource, "read_range", no_remote)
+    offline_range.reset_mock()
     assert not await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is config_entries.ConfigEntryState.SETUP_RETRY
 
     assert await _history(hass) == committed
-    result = await _history(hass, start="2026-01-07T11:59:00+00:00")
+    result = await _history(hass, start=uncached_start)
     assert result["status"] == "partial"
     assert result["readings"] == committed["readings"]
-    assert len(result["missing_ranges"]) == 1
-    no_remote.assert_not_awaited()
+    assert result["missing_ranges"] == [{"start": uncached_start_ms, "end": retention_start_ms}]
+    offline_range.assert_not_awaited()
 
     await hass.config_entries.async_remove(entry.entry_id)
     with pytest.raises(ServiceValidationError):
