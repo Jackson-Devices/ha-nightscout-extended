@@ -25,7 +25,10 @@ BEARER = "fixture-bearer"
 SECRET = "fixture-site-secret"
 VERSION = "/api/v3/version"
 EXCHANGE = f"/api/v2/authorization/request/{TOKEN}"
+ENTRIES_V1 = "/api/v1/entries.json"
 ENTRIES_V3 = "/api/v3/entries"
+LAST_MODIFIED = "/api/v3/lastModified"
+HISTORY_V3 = f"{ENTRIES_V3}/history/"
 TREATMENTS_V3 = "/api/v3/treatments"
 TREATMENTS_V1 = "/api/v1/treatments.json"
 PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal"
@@ -71,6 +74,75 @@ def _ms(value):
     return int(datetime.fromisoformat(value).timestamp() * 1000)
 
 
+def _mock_v1_sgv(mocker, entries=(), *, status=200):
+    """Serve a legacy snapshot using the requested measurement-time bounds."""
+    path = re.escape(URL + ENTRIES_V1)
+
+    async def entries_response(method, url, _data):
+        query = url.query
+        assert query["find[type]"] == "sgv"
+        assert set(query) - {"token"} == {
+            "find[type]", "find[date][$gte]", "find[date][$lt]", "count",
+        }
+        start, end = int(query["find[date][$gte]"]), int(query["find[date][$lt]"])
+        assert start < end
+        count = int(query["count"])
+        assert count > 0
+        rows = sorted(
+            (row for row in entries if start <= row["date"] < end),
+            key=lambda row: row["date"], reverse=True,
+        )
+        return AiohttpClientMockResponse(method, url, status=status, json=rows[:count])
+
+    mocker.get(re.compile(rf"^{path}\?"), side_effect=entries_response)
+
+
+def _mock_v3_sgv(mocker, entries, *, deleted=()):
+    """Serve separate measurement SEARCH and storage HISTORY over the same records."""
+
+    def reply(method, url, result):
+        return AiohttpClientMockResponse(method, url, status=200, json={"status": 200, "result": result})
+
+    async def search_response(method, url, _data):
+        query = url.query
+        assert set(query) == {"type", "date$gte", "date$lt", "sort", "limit", "skip"}
+        assert query["type"] == "sgv" and query["sort"] == "date"
+        start, end = int(query["date$gte"]), int(query["date$lt"])
+        skip, limit = int(query["skip"]), int(query["limit"])
+        assert start < end and skip >= 0 and limit > 0
+        rows = sorted(
+            (row for row in entries if start <= row["date"] < end),
+            key=lambda row: (row["date"], row["identifier"]),
+        )
+        return reply(method, url, rows[skip:skip + limit])
+
+    async def history_response(method, url, _data):
+        assert set(url.query) == {"limit"}
+        boundary = int(url.path.removeprefix(HISTORY_V3))
+        limit = int(url.query["limit"])
+        assert limit > 0
+        rows = sorted(
+            (row for row in (*entries, *deleted) if row["srvModified"] > boundary),
+            key=lambda row: row["srvModified"],
+        )
+        return reply(method, url, rows[:limit])
+
+    async def last_modified_response(method, url, _data):
+        assert not url.query
+        marker = max(
+            (max(row.get("date", 0), row["srvModified"]) for row in (*entries, *deleted)),
+            default=None,
+        )
+        return reply(method, url, {
+            "srvDate": int(time() * 1000),
+            "collections": {"entries": marker} if marker is not None else {},
+        })
+
+    mocker.get(re.compile(rf"^{re.escape(URL + ENTRIES_V3)}\?"), side_effect=search_response)
+    mocker.get(re.compile(rf"^{re.escape(URL + HISTORY_V3)}\d+\?"), side_effect=history_response)
+    mocker.get(f"{URL}{LAST_MODIFIED}", side_effect=last_modified_response)
+
+
 def _mock_site(
     mocker: AiohttpClientMocker, *, v3=False, v3_reading=READING, v3_glucose=153,
     forecast=FORECAST, treatments=LEGACY_TREATMENTS,
@@ -98,6 +170,8 @@ def _mock_site(
     mocker.get(f"{URL}{PROPERTIES}", json=props)
     if not v3:
         mocker.get(f"{URL}{VERSION}", status=404)
+        # Public and stored-secret entries can read v2 properties despite raw denial.
+        _mock_v1_sgv(mocker, status=403)
         mocker.get(
             f"{URL}{TREATMENTS_V1}", params={"sort[0][0]": "duration", "sort[0][1]": "desc"}, json=[],
         )
@@ -110,10 +184,14 @@ def _mock_site(
         json={"status": 200, "result": {"version": "15.0.9", "apiVersion": "3.0.5"}},
     )
     mocker.get(f"{URL}{EXCHANGE}", json={"token": BEARER, "iat": now, "exp": now + 86400})
-    mocker.get(
-        f"{URL}{ENTRIES_V3}",
-        json={"status": 200, "result": [{"type": "sgv", "sgv": v3_glucose, "date": _ms(v3_reading)}]},
-    )
+    _mock_v3_sgv(mocker, ({
+        "identifier": "parity-sgv",
+        "type": "sgv",
+        "sgv": v3_glucose,
+        "date": _ms(v3_reading),
+        "direction": "FortyFiveUp",
+        "srvModified": _ms(v3_reading) + 1000,
+    },))
     modern = []
     for row in reversed(treatments[1:]):
         treatment = dict(row)
@@ -171,23 +249,35 @@ def _device_id(hass, entry):
     return devices[0].id
 
 
-def _assert_wire_mode(mocker, *, v3, token=None, secret=None, discovery=False):
+def _assert_wire_mode(mocker, *, v3, token=None, secret=None, discovery=False, bootstrap=False):
     calls = mocker.mock_calls
     paths = {url.path for _, url, _, _ in calls}
     assert PROPERTIES in paths
     if discovery:
         assert VERSION in paths
+    v3_reads = {ENTRIES_V3, TREATMENTS_V3, LAST_MODIFIED}
+    history_paths = {path for path in paths if path.startswith(HISTORY_V3)}
     if v3:
-        assert {ENTRIES_V3, TREATMENTS_V3} <= paths
-        assert TREATMENTS_V1 not in paths
+        assert TREATMENTS_V3 in paths
+        assert history_paths
+        assert paths.isdisjoint({ENTRIES_V1, TREATMENTS_V1})
+        if bootstrap:
+            series_paths = [
+                url.path for _, url, _, _ in calls
+                if url.path in {ENTRIES_V3, LAST_MODIFIED} or url.path in history_paths
+            ]
+            assert len(series_paths) == 3
+            assert series_paths[:2] == [LAST_MODIFIED, ENTRIES_V3]
+            assert series_paths[2].startswith(HISTORY_V3)
     else:
-        assert not paths.intersection({ENTRIES_V3, TREATMENTS_V3, EXCHANGE})
-        assert TREATMENTS_V1 in paths
+        assert not history_paths
+        assert paths.isdisjoint(v3_reads | {EXCHANGE})
+        assert {ENTRIES_V1, TREATMENTS_V1} <= paths
     for method, url, _, headers in calls:
         assert method.upper() == "GET"
         assert url.host == "parity.example.invalid"
         headers = {key.lower(): value for key, value in (headers or {}).items()}
-        if url.path in {ENTRIES_V3, TREATMENTS_V3}:
+        if url.path in v3_reads or url.path in history_paths:
             assert headers["authorization"] == f"Bearer {BEARER}"
             assert "api-secret" not in headers and "token" not in url.query
         elif url.path in {VERSION, EXCHANGE}:
@@ -291,6 +381,7 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
         assert await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
         assert entry.state is config_entries.ConfigEntryState.LOADED
+        _assert_wire_mode(aioclient_mock, v3=True, token=TOKEN, discovery=True, bootstrap=True)
         _assert_snapshot(hass)
         aioclient_mock.mock_calls.clear()
         await _assert_calendar_range(hass, entry)
@@ -469,7 +560,7 @@ async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
     _mock_site(aioclient_mock, v3=True, v3_reading=V3_READING, v3_glucose=162)
     entry = await _configure(hass)
     try:
-        _assert_wire_mode(aioclient_mock, v3=True, token=TOKEN, discovery=True)
+        _assert_wire_mode(aioclient_mock, v3=True, token=TOKEN, discovery=True, bootstrap=True)
         paths = {url.path for _, url, _, _ in aioclient_mock.mock_calls}
         assert EXCHANGE in paths
         assert _state(hass, "glucose").state == "162"

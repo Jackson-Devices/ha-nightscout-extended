@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 
 import pytest
 from homeassistant import config_entries
@@ -24,6 +25,9 @@ def _mock(aioclient_mock: AiohttpClientMocker, status=STATUS, ok=True):
     aioclient_mock.get(f"{URL}/api/v1/status.json", json=status if ok else {}, status=code)
     aioclient_mock.get(f"{URL}/api/v2/properties/bgnow", json=PROPS if ok else {}, status=code)
     aioclient_mock.get(f"{URL}/api/v3/version", status=404)
+    # These legacy fixtures grant access to calculated properties and treatments only.
+    raw_entries = re.compile(rf"^{re.escape(URL)}/api/v1/entries\.json\?")
+    aioclient_mock.get(raw_entries, status=403 if ok else 401)
     aioclient_mock.get(
         f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS if ok else {}, status=code
     )
