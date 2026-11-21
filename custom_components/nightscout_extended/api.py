@@ -114,9 +114,14 @@ class NightscoutData:
                 return t
         return None
 
+    @property
+    def forecast_source_time(self) -> datetime | None:
+        """The v2 bgnow timestamp used to select an AR2 horizon."""
+        return self.glucose_time if self._forecast_anchor is False else self._forecast_anchor
+
     def forecast_at(self, minutes: int) -> ForecastPoint | None:
-        """The forecast point closest to `minutes` after the latest reading (within 3 min)."""
-        anchor = self.glucose_time if self._forecast_anchor is False else self._forecast_anchor
+        """The forecast point closest to `minutes` after its source reading (within 3 min)."""
+        anchor = self.forecast_source_time
         if not self.forecast or anchor is None:
             return None
         target = anchor.timestamp() + minutes * 60
@@ -144,6 +149,14 @@ def _num(value: Any) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _object(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def parse_properties(props: dict[str, Any]) -> NightscoutData:
     """Turn a /api/v2/properties response into NightscoutData.
 
@@ -151,29 +164,33 @@ def parse_properties(props: dict[str, Any]) -> NightscoutData:
     """
     data = NightscoutData()
 
-    bgnow = props.get("bgnow") or {}
+    bgnow = _object(props.get("bgnow"))
     data.glucose = _num(bgnow.get("last"))
     data.glucose_time = _ms_to_dt(bgnow.get("mills"))
 
-    delta = props.get("delta") or {}
+    delta = _object(props.get("delta"))
     data.delta = _num(delta.get("mgdl"))
 
-    direction = props.get("direction") or {}
-    data.direction = direction.get("value") or None
+    direction = _object(props.get("direction"))
+    data.direction = _text(direction.get("value")) or None
 
-    iob = props.get("iob") or {}
+    iob = _object(props.get("iob"))
     data.iob = _num(iob.get("iob"))
-    data.iob_source = iob.get("source")
+    data.iob_source = _text(iob.get("source"))
 
-    cob = props.get("cob") or {}
+    cob = _object(props.get("cob"))
     data.cob = _num(cob.get("cob"))
-    data.cob_source = cob.get("source")
+    data.cob_source = _text(cob.get("source"))
 
-    basal = (props.get("basal") or {}).get("current") or {}
+    basal = _object(_object(props.get("basal")).get("current"))
     data.basal = _num(basal.get("totalbasal"))
 
-    predicted = ((props.get("ar2") or {}).get("forecast") or {}).get("predicted") or []
+    predicted = _object(_object(props.get("ar2")).get("forecast")).get("predicted")
+    if not isinstance(predicted, list):
+        return data
     for point in predicted:
+        if not isinstance(point, dict):
+            continue
         when, mgdl = _ms_to_dt(point.get("mills")), _num(point.get("mgdl"))
         if when is not None and mgdl is not None:
             data.forecast.append(ForecastPoint(when, mgdl))
@@ -192,32 +209,40 @@ def _parse_time(item: dict[str, Any]) -> datetime | None:
     return _ms_to_dt(item.get("mills") or item.get("date"))
 
 
+def _make_treatment(
+    item: dict[str, Any], uid: str | None, when: datetime, *, strict_numbers: bool = False,
+) -> Treatment:
+    def number(name: str) -> float | None:
+        value = item.get(name)
+        if strict_numbers and type(value) not in (int, float):
+            return None
+        return _num(value) or None
+
+    notes = item.get("notes")
+    return Treatment(
+        uid=uid or str(item.get("_id") or item.get("identifier") or f"{item.get('eventType')}-{when.isoformat()}"),
+        time=when,
+        event_type=str(item.get("eventType") or "Treatment"),
+        carbs=number("carbs"),
+        insulin=number("insulin"),
+        notes=notes if isinstance(notes, str) and notes.strip() else None,
+        entered_by=_text(item.get("enteredBy")),
+        duration_min=number("duration"),
+    )
+
+
 def parse_treatments(items: Any) -> list[Treatment]:
     """Turn /api/v1/treatments.json into Treatments, oldest first. Unusable entries are skipped."""
-    out: list[Treatment] = []
     if not isinstance(items, list):
-        return out
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+        return []
+    rows = _current_treatment_rows([item for item in items if isinstance(item, dict)])
+    treatments = []
+    for uid, item in rows:
         when = _parse_time(item)
-        if when is None:
-            continue
-        notes = item.get("notes")
-        out.append(
-            Treatment(
-                uid=str(item.get("_id") or item.get("identifier") or f"{item.get('eventType')}-{when.isoformat()}"),
-                time=when,
-                event_type=str(item.get("eventType") or "Treatment"),
-                carbs=_num(item.get("carbs")) or None,
-                insulin=_num(item.get("insulin")) or None,
-                notes=notes if isinstance(notes, str) and notes.strip() else None,
-                entered_by=item.get("enteredBy") if isinstance(item.get("enteredBy"), str) else None,
-                duration_min=_num(item.get("duration")) or None,
-            )
-        )
-    out.sort(key=lambda t: t.time)
-    return out
+        if when is not None:
+            treatments.append(_make_treatment(item, uid, when))
+    treatments.sort(key=lambda treatment: treatment.time)
+    return treatments
 
 
 def _iso(dt: datetime) -> str:
@@ -247,38 +272,55 @@ def _source_id(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _treatment_id(row: dict[str, Any]) -> str | None:
-    return _source_id(row.get("_id")) or _source_id(row.get("identifier"))
+def _treatment_identity(row: dict[str, Any]) -> tuple[str, str] | None:
+    storage_id = _source_id(row.get("_id"))
+    if storage_id is not None:
+        return "_id", storage_id
+    identifier = _source_id(row.get("identifier"))
+    return ("identifier", identifier) if identifier is not None else None
+
+
+def _current_treatment_rows(
+    rows: list[dict[str, Any]],
+) -> list[tuple[str | None, dict[str, Any]]]:
+    # Preserve the Mongo _id when an observed identifier alias names the same row.
+    aliases: dict[str, str | None] = {}
+    for row in rows:
+        identifier = _source_id(row.get("identifier"))
+        storage_id = _source_id(row.get("_id"))
+        if identifier is not None and storage_id is not None:
+            if aliases.setdefault(identifier, storage_id) != storage_id:
+                aliases[identifier] = None  # conflicting pairs cannot identify another row
+
+    chosen: dict[tuple[str, str | int], tuple[tuple[float, bool], str | None, dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        identity = _treatment_identity(row)
+        if identity is not None and identity[0] == "identifier":
+            storage_id = aliases.get(identity[1])
+            if storage_id is not None:
+                identity = ("_id", storage_id)
+        # An anonymous row is its own occurrence, including at a shared time.
+        key = identity if identity is not None else ("row", index)
+        uid = identity[1] if identity is not None else None
+        modified = _num(row.get("srvModified"))
+        deleted = row.get("isValid") is False
+        rank = (modified if modified is not None else -math.inf, deleted)
+        if key not in chosen or rank > chosen[key][0]:
+            chosen[key] = (rank, uid, row)
+
+    return [(uid, row) for (_, deleted), uid, row in chosen.values() if not deleted]
 
 
 def _merge_v3_treatments(
     rows: list[dict[str, Any]], start: datetime, end: datetime,
 ) -> list[Treatment]:
-    # v1 exposes Mongo's _id as the HA event ID. A v3 copy of the same row
-    # can carry both IDs, so use the observed pair to reconcile its other copy.
-    aliases = {
-        row["identifier"]: row["_id"]
-        for row in rows
-        if _source_id(row.get("identifier")) and _source_id(row.get("_id"))
-    }
-    chosen: dict[str, tuple[tuple[float, bool], dict[str, Any]]] = {}
-    for row in rows:
-        identifier = _source_id(row.get("identifier"))
-        uid = _source_id(row.get("_id")) or aliases.get(identifier, identifier)
-        modified = _num(row.get("srvModified"))
-        deleted = row.get("isValid") is False
-        rank = (modified if modified is not None else -math.inf, deleted)
-        if uid is not None and (uid not in chosen or rank > chosen[uid][0]):
-            chosen[uid] = (rank, row)
-
-    normalized = []
-    for uid, ((_, deleted), row) in chosen.items():
-        if deleted:
-            continue
+    treatments = []
+    for uid, row in _current_treatment_rows(rows):
         when = _ms_to_dt(row.get("date")) or _parse_iso(row.get("created_at")) or _ms_to_dt(row.get("mills"))
         if when is not None and start <= when < end:
-            normalized.append({**row, "_id": uid, "created_at": when.isoformat()})
-    return parse_treatments(normalized)
+            treatments.append(_make_treatment(row, uid, when, strict_numbers=True))
+    treatments.sort(key=lambda treatment: treatment.time)
+    return treatments
 
 
 def _apply_v3_glucose(
@@ -512,7 +554,7 @@ class NightscoutClient:
             query = {f"{key}$gte": _v3_iso(start), f"{key}${end_predicate}": _v3_iso(end), "sort$desc": key}
             seen = set()
             async for page in self._v3_pages(_V3_TREATMENTS, query, limit):
-                ids = {_treatment_id(row) for row in page}
+                ids = {_treatment_identity(row) for row in page}
                 if None in ids:
                     raise NightscoutConnectionError(f"Missing source identity in {_V3_TREATMENTS}")
                 if page and not ids.difference(seen):

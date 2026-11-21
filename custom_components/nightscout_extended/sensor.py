@@ -51,13 +51,24 @@ class NightscoutSensorDescription(SensorEntityDescription):
     glucose: bool = False  # follows the site's mg/dL or mmol/L setting
 
 
-def _forecast_attrs(data: NightscoutData) -> dict[str, Any]:
-    return {
-        "forecast": [
-            {"time": p.time.isoformat(), "mgdl": round(p.mgdl)} for p in data.forecast
-        ],
-        "model": "AR2",
-    }
+def _forecast_attrs(
+    minutes: int, *, include_curve: bool = False,
+) -> Callable[[NightscoutData], dict[str, Any]]:
+    def fn(data: NightscoutData) -> dict[str, Any]:
+        source = data.forecast_source_time
+        point = data.forecast_at(minutes)
+        attrs: dict[str, Any] = {
+            "source_time": source.isoformat() if source is not None else None,
+            "forecast_time": point.time.isoformat() if point is not None else None,
+        }
+        if include_curve:
+            attrs["forecast"] = [
+                {"time": p.time.isoformat(), "mgdl": round(p.mgdl)} for p in data.forecast
+            ]
+            attrs["model"] = "AR2"
+        return attrs
+
+    return fn
 
 
 def _last(attr: str) -> Callable[[NightscoutData], float | None]:
@@ -163,6 +174,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
         glucose=True,
         device_class=SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION,
         value_fn=_forecast(15),
+        attrs_fn=_forecast_attrs(15),
     ),
     NightscoutSensorDescription(
         key="forecast_30",
@@ -170,7 +182,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
         glucose=True,
         device_class=SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION,
         value_fn=_forecast(30),
-        attrs_fn=_forecast_attrs,
+        attrs_fn=_forecast_attrs(30, include_curve=True),
     ),
 )
 
