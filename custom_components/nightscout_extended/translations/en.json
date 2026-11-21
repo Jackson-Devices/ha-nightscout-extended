@@ -89,6 +89,9 @@
       },
       "insulin_age": {
         "name": "Insulin age"
+      },
+      "cannula_age": {
+        "name": "Cannula age"
       }
     },
     "calendar": {
