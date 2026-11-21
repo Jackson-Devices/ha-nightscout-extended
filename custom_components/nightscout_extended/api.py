@@ -297,7 +297,7 @@ def _source_id(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _reservoir_contact(value: Any) -> datetime | None:
+def _reservoir_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or value[10:11] != "T":
         return None
     try:
@@ -305,6 +305,14 @@ def _reservoir_contact(value: Any) -> datetime | None:
         return contact.astimezone(timezone.utc) if contact.tzinfo is not None else None
     except (ValueError, OverflowError):
         return None
+
+
+def _reservoir_upload_in_window(
+    row: dict[str, Any], field: str, earliest: datetime, latest: datetime,
+) -> bool:
+    raw = row.get(field)
+    uploaded = _ms_to_dt(raw) if field == "date" else _reservoir_timestamp(raw)
+    return uploaded is not None and earliest <= uploaded <= latest
 
 
 def select_reservoir(
@@ -323,7 +331,7 @@ def select_reservoir(
         if "reservoir" not in pump and "timestamp" not in status:
             continue
         discovered.add(device)
-        contact = _reservoir_contact(status.get("timestamp"))
+        contact = _reservoir_timestamp(status.get("timestamp"))
         if device is None or contact is None or not earliest <= contact <= now:
             continue
         raw = pump.get("reservoir")
@@ -636,26 +644,27 @@ class NightscoutClient:
         """Read the AAPS upload window, then rank exclusively on pump contact time."""
         # AAPS timestamps the upload after pump contact on the same clock.
         # Allow one minute of upload clock skew without widening contact freshness.
-        start = _v3_iso(now - _RESERVOIR_MAX_AGE)
-        end = _v3_iso(now + _RESERVOIR_UPLOAD_SKEW)
+        earliest = now - _RESERVOIR_MAX_AGE
+        latest = now + _RESERVOIR_UPLOAD_SKEW
+        start, end = _v3_iso(earliest), _v3_iso(latest)
         if self._use_v3:
             rows = []
             for field in ("date", "created_at"):
                 seen: set[str] = set()
+                # Nightscout 15.0.6 overwrites repeated predicates for a field.
+                # Keep the lower bound on the server and enforce both bounds locally.
                 query = {
                     f"{field}$gte": start,
-                    f"{field}$lte": end,
                     "sort$desc": field,
-                    # Nightscout 15.0.6 prunes response fields by top-level name.
-                    # Select only the reservoir and contact time from pump locally.
-                    "fields": "identifier,device,pump,isValid",
+                    # The projector on that release only keeps literal top-level names.
+                    "fields": "identifier,device,pump,isValid,date,created_at",
                 }
                 async for page in self._v3_pages(_V3_DEVICESTATUS, query, _V3_PAGE_SIZE):
                     ids = {_source_id(row.get("identifier")) for row in page}
                     if None in ids or (page and not ids.difference(seen)):
                         raise NightscoutConnectionError("Non-progressing v3 device-status range")
                     seen.update(identifier for identifier in ids if identifier is not None)
-                    rows.extend(page)
+                    rows.extend(row for row in page if _reservoir_upload_in_window(row, field, earliest, latest))
         else:
             rows = await self._get(
                 _V1_DEVICESTATUS,
@@ -670,6 +679,7 @@ class NightscoutClient:
                 or any(not isinstance(row, dict) for row in rows)
             ):
                 raise NightscoutConnectionError("Incomplete legacy device-status range")
+            rows = [row for row in rows if _reservoir_upload_in_window(row, "created_at", earliest, latest)]
         return select_reservoir(rows, now, uploader)
 
     async def _legacy_treatment_range(self, start: str, end: str, limit: int) -> Any:
