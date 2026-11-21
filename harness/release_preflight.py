@@ -36,6 +36,17 @@ REQUIRED_INSTALL = {
     "translations/en.json", "www/nightscout-glucose-card.js",
 }
 PYTEST_GATES = ("api", "ha", "ha-positive", "supplemental")
+SUPPLEMENTAL = "tests_contract/adapter/test_supplemental_replay.py"
+RAW_REPLAY = f"{SUPPLEMENTAL}::test_supplemental_frozen_replay"
+RAW_CASES = {
+    b"A-V3-PUBLIC-VERSION", b"A-V3-RENEW", b"A-V3-REVOKED", b"A-V3-SUBJECT-FAILURES",
+    b"A-V3-FORBIDDEN", b"G-PUBLIC-DELTA", b"G-V3-DELTA", b"D-CALCULATED", b"D-SETTINGS-ONLY",
+    b"F-AR2-MIXED", b"T-LEGACY", b"T-V3-PAGED", b"T-FUTURE-OVERLAP",
+}
+RAW_FAILURE = re.compile(
+    rb"(?m)^FAILED [^\r\n]*::test_supplemental_frozen_replay\[([A-Z0-9-]+)\]"
+    rb" - (?:Failed: )?(SUPPLEMENT_MISMATCH|SUPPLEMENT_HARNESS|SUPPLEMENT_POLICY_MISMATCH)\b"
+)
 CONTROLS = {
     "good": (0, rb"^PASS [1-9]"),
     "wrong-route": (1, rb"^FAIL .*: wire "),
@@ -269,17 +280,17 @@ def package_install(output, install):
     }
 
 
-def command(repo, argv, env):
+def command(repo, argv, env, *, capture_stderr=False):
     try:
         proc = subprocess.run(
             argv, cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=420, check=False,
+            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL, timeout=420, check=False,
         )
     except subprocess.TimeoutExpired:
-        return None, b"", "timeout"
+        return None, b"", b"", "timeout"
     except OSError:
-        return None, b"", "could not launch"
-    return proc.returncode, proc.stdout, None
+        return None, b"", b"", "could not launch"
+    return proc.returncode, proc.stdout, proc.stderr or b"", None
 
 
 def pytest_counts(output):
@@ -289,6 +300,47 @@ def pytest_counts(output):
                 rb"\b(\d+)\s+(passed|failed|errors?|skipped|xfailed|xpassed)\b", line,
             )}
     return {}
+
+
+def raw_characterization(exit_code, output, launch_error):
+    counts = pytest_counts(output)
+    markers = [(case, marker) for case, marker in RAW_FAILURE.findall(output) if case in RAW_CASES]
+    mismatches = {case for case, marker in markers if marker == b"SUPPLEMENT_MISMATCH"}
+    harness_errors = sum(marker == b"SUPPLEMENT_HARNESS" for _, marker in markers)
+    errors = counts.get("error", 0) + counts.get("errors", 0)
+    row = {
+        "gating": False, "exit_code": exit_code, "passed": counts.get("passed", 0),
+        "failed": counts.get("failed", 0), "skipped": counts.get("skipped", 0), "errors": errors,
+        "counts_observed": bool(counts), "harness_errors": harness_errors,
+        "comparison_mismatches": len(mismatches),
+        "mismatch_cases": sorted(case.decode("ascii") for case in mismatches),
+    }
+    if exit_code == 5 or re.search(rb"(?mi)^(?:_+ )?ERROR collecting\b|\b\d+ errors? during collection\b", output):
+        row["category"] = "collection_error"
+    elif launch_error or exit_code not in (0, 1) or errors or harness_errors:
+        row["category"] = "infrastructure_failure"
+    elif (exit_code, row["passed"], row["failed"], row["skipped"], len(mismatches), len(markers)) == (1, 1, 12, 0, 12, 12):
+        row["category"] = "historical_raw_comparison"
+    else:
+        row["category"] = "unexpected_raw_result"
+    return row
+
+
+def raw_ok(row):
+    if not isinstance(row, dict) or row.get("gating") is not False or row.get("category") != "historical_raw_comparison":
+        return False
+    expected = {
+        "exit_code": 1, "passed": 1, "failed": 12, "skipped": 0,
+        "errors": 0, "harness_errors": 0, "comparison_mismatches": 12,
+    }
+    cases = row.get("mismatch_cases")
+    return (
+        row.get("counts_observed") is True
+        and all(type(row.get(key)) is int and row[key] == value for key, value in expected.items())
+        and isinstance(cases, list) and len(cases) == 12 and all(
+            isinstance(case, str) and case.encode() in RAW_CASES for case in cases
+        ) and len(set(cases)) == 12
+    )
 
 
 def node_counts(output):
@@ -333,7 +385,10 @@ def gate_ok(gate, row):
                     observed.get(key, 0) == 0 for key in ("fail", "cancelled", "skipped", "todo")
                 ))
     if gate.startswith("control-"):
-        return row.get("exit_code") == CONTROLS[gate.removeprefix("control-")][0] and observed.get("marker") is True
+        expected_exit = CONTROLS[gate.removeprefix("control-")][0]
+        stream = "stdout" if expected_exit == 0 else "stderr"
+        return (row.get("exit_code") == expected_exit and observed.get("marker") is True
+                and observed.get("stream") == stream)
     return (row.get("exit_code") == 0 and SERVER_STAGES[gate] <= observed.keys()
             and all(isinstance(value, dict) and value.get("passed") is True for value in observed.values())
             and all(observed[name].get("exit_code") == 0
@@ -359,7 +414,7 @@ def collect(args, candidate, output):
     for binary, expected in ((parser, "Python " + specs["environments"]["parser"]["python"]),
                              (ha, "Python " + specs["environments"]["ha"]["python"]),
                              (node, "v" + specs["node"]["version"])):
-        code, captured, _ = command(qa, [binary, "--version"], env)
+        code, captured, _, _ = command(qa, [binary, "--version"], env)
         require(code == 0 and captured.strip() == expected.encode(), "Staged runtime version differs from QA lock")
 
     py = ["-m", "pytest", "-q", "--color=no", "--tb=no", "--show-capture=no", "-p", "no:cacheprovider"]
@@ -369,10 +424,12 @@ def collect(args, candidate, output):
         "ha": [ha, *py, *config, "tests_ha"],
         "ha-positive": [ha, *py, *config, "tests_contract/adapter/test_upstream_checks.py::test_upstream_setup_and_lifecycle",
                         "tests_contract/adapter/test_forecast_compatibility.py"],
-        "supplemental": [ha, *py, *config, "tests_contract/adapter/test_supplemental_replay.py"],
-        "card": [node, "--test", *sorted(path for path in tracked_tree(qa, "tests_js") if path.endswith(".test.mjs"))],
+        "supplemental": [ha, *py, *config, f"{SUPPLEMENTAL}::test_supplemental_integrated_compatibility",
+                         f"{SUPPLEMENTAL}::test_supplemental_late_calendar_fault"],
+        "card": [node, "--test", "--test-reporter=tap",
+                 *sorted(path for path in tracked_tree(qa, "tests_js") if path.endswith(".test.mjs"))],
     }
-    require(len(tests["card"]) > 2, "QA card test files are missing")
+    require(len(tests["card"]) > 3, "QA card test files are missing")
     tests.update({f"control-{name}": [parser, f"{CONTRACT}/run.py", name] for name in CONTROLS})
     started = now()
     records = {}
@@ -394,14 +451,17 @@ def collect(args, candidate, output):
                     argv.append("--pull")
             else:
                 argv = tests[gate]
-            exit_code, captured, error = command(qa, argv, env)
+            is_control = gate.startswith("control-")
+            exit_code, captured, stderr, error = command(qa, argv, env, capture_stderr=is_control)
             if gate in PYTEST_GATES:
                 observed = pytest_counts(captured)
             elif gate == "card":
                 observed = node_counts(captured)
-            elif gate.startswith("control-"):
-                pattern = CONTROLS[gate.removeprefix("control-")][1]
-                observed = {"marker": re.search(pattern, captured, re.MULTILINE) is not None}
+            elif is_control:
+                expected_exit, pattern = CONTROLS[gate.removeprefix("control-")]
+                stream = "stdout" if expected_exit == 0 else "stderr"
+                source = captured if stream == "stdout" else stderr
+                observed = {"stream": stream, "marker": re.search(pattern, source, re.MULTILINE) is not None}
             else:
                 observed = native_stages(native_output / "results.json", runner, lock_sha)
             row = {"gate": gate, "qa_sha": candidate["qa_sha"], "exit_code": exit_code, "observed": observed}
@@ -411,6 +471,14 @@ def collect(args, candidate, output):
             records[gate] = row
             exact_checkout(qa, candidate["qa_sha"], "QA")
             print(f"{gate} [{row['status']}] exit {exit_code}", flush=True)
+        raw_py = ["--tb=line" if option == "--tb=no" else option for option in py]
+        raw_exit, raw_output, _, raw_error = command(
+            qa, [ha, *raw_py, "-rfE", *config, RAW_REPLAY], {**env, "COLUMNS": "240"},
+        )
+        raw = raw_characterization(raw_exit, raw_output, raw_error)
+        print(f"raw supplemental [{raw['category']}] exit {raw_exit}: "
+              f"{raw['passed']} passed, {raw['failed']} failed, {raw['skipped']} skipped", flush=True)
+        exact_checkout(qa, candidate["qa_sha"], "QA")
     check_qa_execution_bytes(qa)
     evidence = {
         "schema": 1, "product_sha": candidate["product_sha"], "qa_sha": candidate["qa_sha"],
@@ -418,10 +486,10 @@ def collect(args, candidate, output):
         "lock_sha256": lock_sha, "runner_id": args.runner_id, "started_at": started.isoformat(),
         "runtimes": {"parser": specs["environments"]["parser"]["python"],
                      "home_assistant_python": specs["environments"]["ha"]["python"], "node": specs["node"]["version"]},
-        "finished_at": now().isoformat(), "gates": records,
+        "finished_at": now().isoformat(), "gates": records, "raw_characterization": raw,
     }
     save_json(output / "gates.json", evidence)
-    return 0 if all(row["status"] == "passed" for row in records.values()) else 1
+    return 0 if raw_ok(raw) and all(row["status"] == "passed" for row in records.values()) else 1
 
 
 def verify_evidence(candidate, qa, path):
@@ -447,7 +515,14 @@ def verify_evidence(candidate, qa, path):
         require(isinstance(row, dict) and row.get("gate") == gate and row.get("qa_sha") == candidate["qa_sha"]
                 and row.get("status") == "passed" and gate_ok(gate, row), f"Required gate failed: {gate}")
     require(set(gates) == set(GATES), "Gate evidence has unexpected entries")
-    return runner, {gate: {"status": "passed", "exit_code": gates[gate]["exit_code"]} for gate in GATES}, digest(supplied)
+    raw = evidence.get("raw_characterization")
+    require(raw_ok(raw), "Historical raw comparison is missing or unexpectedly changed")
+    safe_raw = {key: raw[key] for key in (
+        "gating", "category", "exit_code", "passed", "failed", "skipped", "errors",
+        "counts_observed", "harness_errors", "comparison_mismatches", "mismatch_cases",
+    )}
+    accepted = {gate: {"status": "passed", "exit_code": gates[gate]["exit_code"]} for gate in GATES}
+    return runner, accepted, safe_raw, digest(supplied)
 
 
 def preview(args, candidate, output):
@@ -460,7 +535,7 @@ def preview(args, candidate, output):
     install = check_install(product, qa)
     notes = args.notes or args.candidate.with_name("daybreak.md")
     changelog, contribution = check_version(candidate, product, install, notes)
-    runner, gates, evidence_sha = verify_evidence(candidate, qa, args.evidence)
+    runner, gates, raw, evidence_sha = verify_evidence(candidate, qa, args.evidence)
     package = package_install(output, install)
     (output / "changelog-section.md").write_text(changelog, encoding="utf-8")
     (output / "contribution-notes.md").write_text(contribution, encoding="utf-8")
@@ -470,7 +545,7 @@ def preview(args, candidate, output):
         "local_tag_target": candidate["product_sha"], "upstream_tag_recorded_target": candidate["upstream_tag_sha"],
         "upstream_tag_matches_candidate": candidate["upstream_tag_sha"] == candidate["product_sha"],
         "publication_status": "hold", "gate_evidence_sha256": evidence_sha,
-        "runner_id": runner, "gates": gates,
+        "runner_id": runner, "gates": gates, "raw_characterization": raw,
         "changelog_sha256": digest(changelog.encode()), "contribution_notes_sha256": digest(contribution.encode()),
         "package": package, "completed_at": now().isoformat(),
     })
