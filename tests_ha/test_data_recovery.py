@@ -15,8 +15,11 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClien
 from test_v3_integration import (
     BEARER,
     CALENDAR,
+    ENTRIES_V1,
     ENTRIES_V3,
     EXCHANGE,
+    HISTORY_V3,
+    LAST_MODIFIED,
     PROPERTIES,
     READING,
     TOKEN,
@@ -26,6 +29,8 @@ from test_v3_integration import (
     VERSION,
     _assert_wire_mode,
     _configure,
+    _mock_v1_sgv,
+    _mock_v3_sgv,
     _ms,
     _refresh,
     _state,
@@ -36,6 +41,21 @@ LATE_READING = "2026-01-08T12:18:00+00:00"
 LATE_TREATMENT = "2026-01-08T12:12:00+00:00"
 FIRST_FORECAST = (("2026-01-08T12:15:02+00:00", 207), ("2026-01-08T12:30:02+00:00", 231))
 RECOMPUTED_FORECAST = (("2026-01-08T12:53:02+00:00", 179), ("2026-01-08T13:08:02+00:00", 192))
+
+
+def _sgv(identifier, measured, glucose, written):
+    return {
+        "identifier": identifier,
+        "type": "sgv",
+        "date": _ms(measured),
+        "sgv": glucose,
+        "srvModified": _ms(written),
+    }
+
+
+FIRST_SGV = _sgv("first-sgv", READING, 153, "2026-01-08T12:00:01+00:00")
+NEW_SGV = _sgv("new-sgv", NEW_READING, 166, "2026-01-08T12:40:58+00:00")
+LATE_SGV = _sgv("late-sgv", LATE_READING, 93, "2026-01-08T12:41:30+00:00")
 
 
 def _curve(*points):
@@ -54,13 +74,14 @@ def _snapshot(
     *,
     v3: bool,
     reading=(READING, 153),
+    entries=(FIRST_SGV,),
+    deleted=(),
     ar2=None,
     late=False,
-    empty=False,
 ):
-    """Expose raw v2 properties and the corresponding collections for one poll."""
+    """Expose v2 calculations and the site's separate stored collections."""
     mocker.clear_requests()
-    bgnow = {"last": reading[1], "mills": _ms(reading[0])} if reading and (v3 or not empty) else {}
+    bgnow = {"last": reading[1], "mills": _ms(reading[0])} if reading else {}
     props = {
         "bgnow": bgnow,
         "iob": {"iob": 1.35, "source": "fixture-pump"},
@@ -81,6 +102,12 @@ def _snapshot(
     ] if late else []
     if not v3:
         mocker.get(f"{URL}{VERSION}", status=404)
+        legacy_entries = []
+        for row in entries:
+            legacy_row = row.copy()
+            legacy_row["_id"] = legacy_row.pop("identifier")
+            legacy_entries.append(legacy_row)
+        _mock_v1_sgv(mocker, legacy_entries)
         mocker.get(f"{URL}{TREATMENTS_V1}", params={"sort[0][0]": "duration"}, json=[])
         mocker.get(f"{URL}{TREATMENTS_V1}", json=treatments)
         return
@@ -91,10 +118,7 @@ def _snapshot(
         json={"status": 200, "result": {"version": "15.0.9", "apiVersion": "3.0.5"}},
     )
     mocker.get(f"{URL}{EXCHANGE}", json={"token": BEARER, "iat": now, "exp": now + 86400})
-    entries = [] if empty else [{"type": "sgv", "date": _ms(reading[0]), "sgv": reading[1]}]
-    if late:
-        entries.insert(0, {"type": "sgv", "date": _ms(LATE_READING), "sgv": 93})
-    mocker.get(f"{URL}{ENTRIES_V3}", json={"status": 200, "result": entries})
+    _mock_v3_sgv(mocker, entries, deleted=deleted)
 
     # The same late document can match both the date and created_at scans.
     v3_treatments = [
@@ -152,7 +176,7 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
     entry = await _configure(hass)
     coordinator = entry.runtime_data
     try:
-        _assert_wire_mode(aioclient_mock, v3=v3, token=TOKEN, discovery=True)
+        _assert_wire_mode(aioclient_mock, v3=v3, token=TOKEN, discovery=True, bootstrap=v3)
         _assert_reading_and_calculations(hass, "153", READING)
         _assert_forecasts(hass, READING, *FIRST_FORECAST)
         assert await _calendar_range(hass) == []
@@ -174,9 +198,33 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
             _assert_reading_and_calculations(hass, "153", READING)
             _assert_forecasts(hass, READING, *expected)
 
-        # V3 still supplies the old v2 bgnow in this fixture; empty authoritative
-        # SGV entries must remain distinct from receiving the same SGV again.
-        _snapshot(aioclient_mock, v3=v3, empty=True)
+        # Nothing was written since the full refresh at 12:35. Two no-change
+        # ticks retain the known sample even though Nightscout has no HISTORY rows.
+        _snapshot(aioclient_mock, v3=v3)
+        for _ in range(2):
+            aioclient_mock.mock_calls.clear()
+            await _refresh(hass, entry)
+            _assert_reading_and_calculations(hass, "153", READING)
+            _assert_forecasts(hass, READING, None, None)
+            if v3:
+                series_calls = [
+                    url.path for _, url, _, _ in aioclient_mock.mock_calls
+                    if url.path in {ENTRIES_V3, LAST_MODIFIED} or url.path.startswith(HISTORY_V3)
+                ]
+                assert len(series_calls) == 1 and series_calls[0].startswith(HISTORY_V3)
+                assert int(series_calls[0].removeprefix(HISTORY_V3)) >= FIRST_SGV["srvModified"]
+
+        # A versioned tombstone, or an empty authoritative v1 snapshot and
+        # empty v2 bgnow, is the explicit removal. The V3 v2 anchor remains old.
+        freezer.move_to("2026-01-08T12:35:01+00:00")
+        removed = {
+            "identifier": FIRST_SGV["identifier"], "type": "sgv", "isValid": False,
+            "srvModified": _ms("2026-01-08T12:35:01+00:00"),
+        }
+        _snapshot(
+            aioclient_mock, v3=v3, reading=(READING, 153) if v3 else None,
+            entries=(), deleted=(removed,) if v3 else (),
+        )
         await _refresh(hass, entry)
         _assert_reading_and_calculations(hass, STATE_UNKNOWN, STATE_UNKNOWN)
         _assert_forecasts(hass, READING if v3 else None, None, None)
@@ -190,7 +238,13 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
         await hass.async_block_till_done()
         assert entry.state is config_entries.ConfigEntryState.LOADED
         assert not coordinator.last_update_success
-        assert {url.path for _, url, _, _ in aioclient_mock.mock_calls} == {PROPERTIES}
+        outage_paths = {url.path for _, url, _, _ in aioclient_mock.mock_calls}
+        if v3:
+            raw_paths = {path for path in outage_paths if path.startswith(HISTORY_V3)}
+            assert len(raw_paths) == 1
+            assert outage_paths - raw_paths == {PROPERTIES, TREATMENTS_V3}
+        else:
+            assert outage_paths == {PROPERTIES, TREATMENTS_V1, ENTRIES_V1}
         for name in (
             "glucose", "last_reading", "insulin_on_board", "carbs_on_board",
             "forecast_in_15_minutes", "forecast_in_30_minutes",
@@ -199,7 +253,8 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
         assert hass.states.get(CALENDAR).state == STATE_UNAVAILABLE
 
         # Recovery is triggered by HA's next scheduled poll on the same entry.
-        _snapshot(aioclient_mock, v3=v3, ar2=base_curve)
+        restored = {**FIRST_SGV, "srvModified": removed["srvModified"] + 1}
+        _snapshot(aioclient_mock, v3=v3, entries=(restored,), ar2=base_curve)
         freezer.tick(coordinator.update_interval + timedelta(seconds=1))
         async_fire_time_changed(hass)
         await hass.async_block_till_done(wait_background_tasks=True)
@@ -212,12 +267,14 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
         freezer.move_to("2026-01-08T12:41:00+00:00")
         latest = (NEW_READING, 166)
         short_curve = _curve(("2026-01-08T12:43:02+00:00", 170))
-        _snapshot(aioclient_mock, v3=v3, reading=latest, ar2=short_curve)
+        _snapshot(aioclient_mock, v3=v3, reading=latest, entries=(restored, NEW_SGV), ar2=short_curve)
         await _refresh(hass, entry)
         _assert_reading_and_calculations(hass, "166", NEW_READING)
         _assert_forecasts(hass, NEW_READING, None, None)
 
-        _snapshot(aioclient_mock, v3=v3, reading=latest, ar2=short_curve, late=True)
+        freezer.move_to("2026-01-08T12:42:00+00:00")
+        retained = (restored, NEW_SGV, LATE_SGV)
+        _snapshot(aioclient_mock, v3=v3, reading=latest, entries=retained, ar2=short_curve, late=True)
         await _refresh(hass, entry)
         _assert_reading_and_calculations(hass, "166", NEW_READING)
         _assert_forecasts(hass, NEW_READING, None, None)
@@ -228,7 +285,10 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
 
         # Only the server's recomputed curve restores both scalar forecasts.
         # The repeated calendar snapshot contains the same event exactly once.
-        _snapshot(aioclient_mock, v3=v3, reading=latest, ar2=_curve(*RECOMPUTED_FORECAST), late=True)
+        _snapshot(
+            aioclient_mock, v3=v3, reading=latest, entries=retained,
+            ar2=_curve(*RECOMPUTED_FORECAST), late=True,
+        )
         for _ in range(2):
             await _refresh(hass, entry)
             _assert_reading_and_calculations(hass, "166", NEW_READING)

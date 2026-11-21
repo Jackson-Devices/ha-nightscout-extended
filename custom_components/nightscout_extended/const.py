@@ -4,6 +4,8 @@ DOMAIN = "nightscout_extended"
 
 CONF_USE_API_SECRET = "use_api_secret"
 CONF_SCAN_INTERVAL = "scan_interval"
+CONF_SGV_HISTORY_DAYS = "sgv_history_days"
+SERVICE_GET_GLUCOSE_HISTORY = "get_glucose_history"
 
 DEFAULT_SCAN_INTERVAL = 60  # seconds; CGM readings arrive every 5 minutes (1 for some sensors)
 MIN_SCAN_INTERVAL = 30

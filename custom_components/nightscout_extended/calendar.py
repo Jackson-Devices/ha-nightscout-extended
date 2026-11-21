@@ -52,6 +52,10 @@ class NightscoutTreatmentsCalendar(CoordinatorEntity[NightscoutCoordinator], Cal
         self._attr_device_info = device_info(coordinator)
 
     @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.treatments_available
+
+    @property
     def event(self) -> CalendarEvent | None:
         """The event happening now, or else the next one."""
         now = dt_util.utcnow()

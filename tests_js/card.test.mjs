@@ -102,14 +102,22 @@ function renderFixture(t, config = {}) {
   card.setConfig({ entity: GLUCOSE, hours_to_show: 1, night_mode: false, ...config });
   card._build();
 
-  return async function render({ glucose = "152", last = timeAt("11:58:00"), forecast, history = [] } = {}) {
+  async function render({
+    entity = GLUCOSE, glucose = "152", last = timeAt("11:58:00"), forecast, history = [],
+    revision, connected = true, callWS,
+  } = {}) {
+    const base = entity.replace(/_glucose$/, "");
     card.hass = {
+      connected,
       states: {
-        [GLUCOSE]: { state: glucose, attributes: { unit_of_measurement: "mg/dL" } },
-        "sensor.test_last_reading": { state: last },
-        "sensor.test_forecast_in_30_minutes": forecast,
+        [entity]: { state: glucose, attributes: { unit_of_measurement: "mg/dL", sgv_history_revision: revision } },
+        [`${base}_last_reading`]: { state: last },
+        [`${base}_forecast_in_30_minutes`]: forecast,
       },
-      callWS: async () => ({ [GLUCOSE]: history }),
+      callWS: callWS ?? (async (message) => {
+        if (message.type === "call_service") throw { code: "not_found" };
+        return { [entity]: history };
+      }),
     };
     await new Promise(setImmediate);
     const paths = [...card._el.chart.innerHTML.matchAll(/<path d="([^"]*)"/g)];
@@ -119,7 +127,9 @@ function renderFixture(t, config = {}) {
       historyPath: paths[0][1],
       forecastPath: paths[1][1],
     };
-  };
+  }
+  render.setConfig = (config) => card.setConfig(config);
+  return render;
 }
 
 test("an unknown 30-minute scalar leaves usable future forecast points visible", async (t) => {
@@ -203,6 +213,112 @@ test("history keeps measured segments through dropout and does not bridge them o
   const current = recovered.historyPath.slice(dropout.historyPath.length).match(/^M([\d.]+,[\d.]+)L\1$/);
   assert.ok(current, "the one recovered reading is a separate visible point");
   assert.ok(recovered.forecastPath.startsWith(`M${current[1]}L`));
+});
+
+const reading = (id, clock, sgv) => ({ id, date: Date.parse(timeAt(clock)), sgv });
+const response = (readings, status = "complete", missing_ranges = []) => ({
+  context: {}, response: { readings, unit: "mg/dL", status, missing_ranges, as_of: timeAt("11:59:45") },
+});
+const pathXs = (path) => [...path.matchAll(/[ML]([\d.]+),/g)].map(([, x]) => Number(x));
+
+test("source history draws all dated readings and refetches once per new revision", async (t) => {
+  const render = renderFixture(t);
+  let readings = [
+    reading("c", "11:50:00", 155), reading("b", "11:40:00", 152),
+    reading("b2", "11:40:00", 153), reading("a", "11:30:00", 150),
+  ];
+  const calls = [];
+  const callWS = async (message) => {
+    calls.push(message);
+    return response(readings);
+  };
+  const first = await render({ revision: "rev-1", last: timeAt("11:50:00"), callWS });
+  assert.deepEqual(calls, [{
+    type: "call_service", domain: "nightscout_extended", service: "get_glucose_history", return_response: true,
+    service_data: { entity_id: GLUCOSE, start: timeAt("11:00:00.000"), end: timeAt("12:00:00.000") },
+  }]);
+  assert.deepEqual(pathXs(first.historyPath), [333.3, 444.4, 444.4, 555.6]);
+  assert.deepEqual(commands(first.historyPath), ["M", "L", "L", "L"]);
+
+  readings = [...readings, reading("late", "11:35:00", 151)];
+  const late = await render({ revision: "rev-2", last: timeAt("11:50:00"), callWS });
+  assert.deepEqual(pathXs(late.historyPath), [333.3, 388.9, 444.4, 444.4, 555.6]);
+
+  readings = [...readings, reading("next", "11:59:00", 157)];
+  const latest = await render({ revision: "rev-3", last: timeAt("11:59:00"), callWS });
+  assert.equal(pathXs(latest.historyPath).at(-1), 655.6);
+  // HA may publish the last-reading entity separately from its history revision.
+  await render({ revision: "rev-3", last: timeAt("11:59:30"), callWS });
+  assert.equal(calls.length, 3);
+});
+
+test("partial and offline source coverage stays explicit and a complete empty range clears the chart", async (t) => {
+  const render = renderFixture(t);
+  const calls = [];
+  let result = response([reading("one", "11:30:00", 143), reading("two", "11:40:00", 145)], "partial", [
+    { start: Date.parse(timeAt("11:32:00")), end: Date.parse(timeAt("11:38:00")) },
+  ]);
+  const callWS = async (message) => {
+    calls.push(message);
+    return result;
+  };
+  const partial = await render({ revision: "same", callWS });
+  assert.deepEqual(partial.footer, ["History partial"]);
+  assert.deepEqual(commands(partial.historyPath), ["M", "L", "M", "L"]);
+  assert.deepEqual(pathXs(partial.historyPath), [333.3, 333.3, 444.4, 444.4]);
+
+  const offline = await render({ revision: "same", connected: false, callWS });
+  assert.deepEqual(offline.footer, ["History cached"]);
+  assert.equal(offline.historyPath, partial.historyPath);
+  assert.equal(calls.length, 1);
+
+  result = response([]);
+  const restored = await render({ revision: "same", callWS });
+  assert.deepEqual(restored.footer, []);
+  assert.equal(restored.historyPath, "");
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((message) => message.type === "call_service"));
+});
+
+test("permission and source errors do not read Recorder as a substitute", async (t) => {
+  const render = renderFixture(t);
+  const calls = [];
+  const callWS = async (message) => {
+    calls.push(message.type);
+    if (calls.length === 1) return response([reading("allowed", "11:30:00", 143)]);
+    throw { code: "home_assistant_error", message: "Unauthorized" };
+  };
+  const before = await render({ revision: "allowed", callWS });
+  assert.deepEqual(pathXs(before.historyPath), [333.3, 333.3]);
+  const denied = await render({ revision: "revoked", callWS });
+  assert.deepEqual(calls, ["call_service", "call_service"]);
+  assert.deepEqual(denied.footer, ["History unavailable"]);
+  assert.equal(denied.historyPath, "");
+});
+
+test("a superseded entity and range cannot replace the displayed SGV series", async (t) => {
+  const render = renderFixture(t);
+  const other = "sensor.other_glucose";
+  let finishFirst;
+  const first = new Promise((resolve) => { finishFirst = resolve; });
+  const calls = [];
+  const callWS = async (message) => {
+    calls.push(message.service_data);
+    return message.service_data.entity_id === GLUCOSE
+      ? first : response([reading("other", "10:30:00", 140)]);
+  };
+  await render({ revision: "first", callWS });
+  render.setConfig({ entity: other, hours_to_show: 2 });
+  const visible = await render({ entity: other, revision: "second", callWS });
+  assert.deepEqual(calls, [
+    { entity_id: GLUCOSE, start: timeAt("11:00:00.000"), end: timeAt("12:00:00.000") },
+    { entity_id: other, start: timeAt("10:00:00.000"), end: timeAt("12:00:00.000") },
+  ]);
+  assert.deepEqual(pathXs(visible.historyPath), [200, 200]);
+  finishFirst(response([reading("old entity", "11:55:00", 180)]));
+  const settled = await render({ entity: other, revision: "second", callWS });
+  assert.equal(settled.historyPath, visible.historyPath);
+  assert.equal(calls.length, 2);
 });
 
 test("card version matches manifest.json, so browsers reload it after an update", async () => {
