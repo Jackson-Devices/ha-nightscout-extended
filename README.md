@@ -27,11 +27,34 @@ integration only provides glucose. This one can run alongside it.
 | Last insulin | U | Most recent treatment with insulin; same attributes |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
 | Insulin age | h | Hours since the latest nonfuture `Insulin Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the change. |
+| Cannula age | h | Hours since the latest nonfuture `Site Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the site change. |
+| CGM sensor age | h | Hours since the latest nonfuture `Sensor Start` or `Sensor Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the event. |
+| Pump battery age | h | Hours since the latest nonfuture `Pump Battery Change` in retained treatments, with UTC `source_time` and `event_type`. Battery percentages and device uploads leave this age unchanged. |
 
 Insulin age uses the Nightscout treatments read permission. It is unknown when the retained history contains no eligible
 change, and unavailable when the lookup fails. Boluses leave the selected change timestamp intact. With the legacy API,
 the retained range uses the UTC `created_at` field that Nightscout writes for treatments. Older imports without a
 stored `created_at` field require v3 for age lookup.
+
+CGM sensor age uses the same treatment history. `Sensor Change` wins if both events have the same timestamp.
+
+### Insulin remaining
+
+The **Insulin remaining** sensor shows the amount reported by AAPS for a Dana-i pump, in U.
+It accepts zero and fractional values. Its `source_time` is the AAPS-observed pump-contact time,
+shown in UTC. A reading is available for up to and including 60 minutes after contact.
+
+Under **Configure**, you can enter the exact `device` label from your site's Nightscout device status
+as **Reservoir uploader**. The label identifies the uploader and can include the phone model.
+AAPS uploaders can share a label, so use a distinct source if you have multiple uploaders.
+If you leave the option blank, Home Assistant saves the first unambiguous uploader that supplies a
+valid reading. Reloading or restarting keeps that binding. An explicit choice takes precedence.
+The live `uploader` attribute shows the label and is excluded from Recorder attributes and diagnostics.
+
+This sensor uses `/api/v3/devicestatus` or the equivalent legacy `/api/v1/devicestatus/` read.
+Nightscout needs to permit device-status reads. A denied read, missing or stale contact, ambiguous
+uploader, or invalid or conflicting latest amount marks this sensor unavailable. Glucose and the
+treatments calendar continue to use their own reads.
 
 ## Treatments calendar
 

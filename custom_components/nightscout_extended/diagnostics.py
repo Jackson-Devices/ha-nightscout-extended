@@ -13,9 +13,10 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_API_KEY, CONF_URL
 from homeassistant.core import HomeAssistant
 
+from .const import CONF_RESERVOIR_UPLOADER
 from .coordinator import NightscoutConfigEntry
 
-TO_REDACT = {CONF_API_KEY, CONF_URL, "customTitle", "baseURL"}
+TO_REDACT = {CONF_API_KEY, CONF_URL, CONF_RESERVOIR_UPLOADER, "customTitle", "baseURL"}
 
 
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: NightscoutConfigEntry) -> dict[str, Any]:
@@ -23,7 +24,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Nightsc
     status = coordinator.status or {}
     return {
         "entry": async_redact_data(dict(entry.data), TO_REDACT),
-        "options": dict(entry.options),
+        "options": async_redact_data(dict(entry.options), TO_REDACT),
         "nightscout": {
             "version": status.get("version"),
             "units": (status.get("settings") or {}).get("units"),

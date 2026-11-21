@@ -29,6 +29,7 @@ async def test_insulin_age_manifest_and_warm_availability(
         f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS,
     )
     aioclient_mock.get(f"{URL}/api/v1/entries.json", json=[])
+    aioclient_mock.get(f"{URL}/api/v1/devicestatus/", json=[])
     original = NightscoutClient._get
     history = [{"_id": "first", "eventType": "Insulin Change", "created_at": "2026-01-05T00:00:00Z"}]
     denied = False

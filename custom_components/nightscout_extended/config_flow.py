@@ -23,6 +23,7 @@ from homeassistant.helpers.selector import (
 
 from .api import NightscoutAuthError, NightscoutClient, NightscoutConnectionError
 from .const import (
+    CONF_RESERVOIR_UPLOADER,
     CONF_SCAN_INTERVAL,
     CONF_SGV_HISTORY_DAYS,
     CONF_USE_API_SECRET,
@@ -118,18 +119,24 @@ class NightscoutExtendedConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class NightscoutExtendedOptionsFlow(OptionsFlow):
-    """Configure polling and the local raw history window."""
+    """Configure polling, the local history window and the reservoir uploader."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             days = float(user_input[CONF_SGV_HISTORY_DAYS])
             if days.is_integer():
-                return self.async_create_entry(data={
+                options = {
                     **self.config_entry.options,
                     CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                     CONF_SGV_HISTORY_DAYS: int(days),
-                })
+                }
+                uploader = user_input.get(CONF_RESERVOIR_UPLOADER)
+                if uploader and uploader.strip():
+                    options[CONF_RESERVOIR_UPLOADER] = uploader
+                else:
+                    options.pop(CONF_RESERVOIR_UPLOADER, None)
+                return self.async_create_entry(data=options)
             errors[CONF_SGV_HISTORY_DAYS] = "invalid_history_days"
 
         return self.async_show_form(
@@ -152,6 +159,10 @@ class NightscoutExtendedOptionsFlow(OptionsFlow):
                         min=MIN_HISTORY_DAYS, max=MAX_HISTORY_DAYS, step=1,
                         unit_of_measurement="d", mode=NumberSelectorMode.BOX,
                     )),
+                    vol.Optional(
+                        CONF_RESERVOIR_UPLOADER,
+                        description={"suggested_value": self.config_entry.options.get(CONF_RESERVOIR_UPLOADER, "")},
+                    ): TextSelector(),
                 }),
                 user_input,
             ),
