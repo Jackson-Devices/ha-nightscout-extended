@@ -31,5 +31,34 @@
         "insulin": 0.75
       }
     }
-  ]
+  ],
+  "calendar": {
+    "minutes_before_anchor": 20,
+    "treatments": [
+      {
+        "field": "date",
+        "minutes_before_anchor": 35,
+        "document": {
+          "_id": {
+            "$oid": "600000000000000000000001"
+          },
+          "eventType": "Temporary Target",
+          "notes": "synthetic overlapping calendar treatment",
+          "duration": 20
+        }
+      },
+      {
+        "field": "date",
+        "minutes_before_anchor": 27,
+        "document": {
+          "_id": {
+            "$oid": "600000000000000000000002"
+          },
+          "eventType": "Temporary Target",
+          "notes": "synthetic shorter calendar control",
+          "duration": 6
+        }
+      }
+    ]
+  }
 }
