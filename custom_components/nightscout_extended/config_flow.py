@@ -23,6 +23,7 @@ from homeassistant.helpers.selector import (
 
 from .api import NightscoutAuthError, NightscoutClient, NightscoutConnectionError
 from .const import (
+    CONF_RESERVOIR_UPLOADER,
     CONF_SCAN_INTERVAL,
     CONF_USE_API_SECRET,
     DEFAULT_SCAN_INTERVAL,
@@ -115,11 +116,17 @@ class NightscoutExtendedConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class NightscoutExtendedOptionsFlow(OptionsFlow):
-    """How often to poll."""
+    """Configure polling and the reservoir uploader."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data={CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL])})
+            options = {**self.config_entry.options, CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL])}
+            uploader = user_input.get(CONF_RESERVOIR_UPLOADER)
+            if uploader and uploader.strip():
+                options[CONF_RESERVOIR_UPLOADER] = uploader
+            else:
+                options.pop(CONF_RESERVOIR_UPLOADER, None)
+            return self.async_create_entry(data=options)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -132,7 +139,11 @@ class NightscoutExtendedOptionsFlow(OptionsFlow):
                             min=MIN_SCAN_INTERVAL, max=900, step=10,
                             unit_of_measurement="s", mode=NumberSelectorMode.BOX,
                         )
-                    )
+                    ),
+                    vol.Optional(
+                        CONF_RESERVOIR_UPLOADER,
+                        description={"suggested_value": self.config_entry.options.get(CONF_RESERVOIR_UPLOADER, "")},
+                    ): TextSelector(),
                 }
             ),
         )

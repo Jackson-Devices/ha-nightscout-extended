@@ -28,6 +28,8 @@ EXCHANGE = f"/api/v2/authorization/request/{TOKEN}"
 ENTRIES_V3 = "/api/v3/entries"
 TREATMENTS_V3 = "/api/v3/treatments"
 TREATMENTS_V1 = "/api/v1/treatments.json"
+DEVICESTATUS_V1 = "/api/v1/devicestatus/"
+DEVICESTATUS_V3 = "/api/v3/devicestatus"
 PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal"
 READING = "2026-01-08T12:00:00+00:00"
 V3_READING = "2026-01-08T12:07:00+00:00"
@@ -73,7 +75,7 @@ def _ms(value):
 
 def _mock_site(
     mocker: AiohttpClientMocker, *, v3=False, v3_reading=READING, v3_glucose=153,
-    forecast=FORECAST, treatments=LEGACY_TREATMENTS,
+    forecast=FORECAST, treatments=LEGACY_TREATMENTS, reservoir=(), reservoir_status=200,
 ):
     """Install responses at the HTTP boundary of HA's existing aiohttp fixture."""
     mocker.clear_requests()
@@ -96,6 +98,7 @@ def _mock_site(
             "forecast": {"predicted": [{"mills": _ms(t), "mgdl": bg} for t, bg in forecast]}
         }
     mocker.get(f"{URL}{PROPERTIES}", json=props)
+    _mock_reservoir(mocker, v3, reservoir, reservoir_status)
     if not v3:
         mocker.get(f"{URL}{VERSION}", status=404)
         mocker.get(
@@ -131,6 +134,12 @@ def _mock_site(
     ):
         query = re.compile(rf"^{path}\?(?:[^#]*&)?{field}(?:\$|%24)gte=")
         mocker.get(query, json={"status": 200, "result": results})
+
+
+def _mock_reservoir(mocker, v3, rows=(), status=200):
+    path = DEVICESTATUS_V3 if v3 else DEVICESTATUS_V1
+    payload = {"status": status, "result": list(rows)} if v3 else list(rows)
+    mocker.get(f"{URL}{path}", json=payload, status=status)
 
 
 async def _configure(hass):
@@ -179,15 +188,16 @@ def _assert_wire_mode(mocker, *, v3, token=None, secret=None, discovery=False):
         assert VERSION in paths
     if v3:
         assert {ENTRIES_V3, TREATMENTS_V3} <= paths
-        assert TREATMENTS_V1 not in paths
+        assert DEVICESTATUS_V3 in paths
+        assert not paths.intersection({TREATMENTS_V1, DEVICESTATUS_V1})
     else:
-        assert not paths.intersection({ENTRIES_V3, TREATMENTS_V3, EXCHANGE})
-        assert TREATMENTS_V1 in paths
+        assert not paths.intersection({ENTRIES_V3, TREATMENTS_V3, DEVICESTATUS_V3, EXCHANGE})
+        assert {TREATMENTS_V1, DEVICESTATUS_V1} <= paths
     for method, url, _, headers in calls:
         assert method.upper() == "GET"
         assert url.host == "parity.example.invalid"
         headers = {key.lower(): value for key, value in (headers or {}).items()}
-        if url.path in {ENTRIES_V3, TREATMENTS_V3}:
+        if url.path in {ENTRIES_V3, TREATMENTS_V3, DEVICESTATUS_V3}:
             assert headers["authorization"] == f"Bearer {BEARER}"
             assert "api-secret" not in headers and "token" not in url.query
         elif url.path in {VERSION, EXCHANGE}:

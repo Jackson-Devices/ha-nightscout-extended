@@ -35,7 +35,11 @@
     "step": {
       "init": {
         "data": {
-          "scan_interval": "Update interval"
+          "scan_interval": "Update interval",
+          "reservoir_uploader": "Reservoir uploader"
+        },
+        "data_description": {
+          "reservoir_uploader": "Enter the exact Nightscout device label for your AAPS uploader. Leave blank to use the saved or uniquely discovered uploader."
         }
       }
     }
@@ -68,6 +72,9 @@
       },
       "iob": {
         "name": "Insulin on board"
+      },
+      "insulin_remaining": {
+        "name": "Insulin remaining"
       },
       "cob": {
         "name": "Carbs on board"

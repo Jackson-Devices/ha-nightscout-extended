@@ -26,6 +26,7 @@ from test_v3_integration import (
     VERSION,
     _assert_wire_mode,
     _configure,
+    _mock_reservoir,
     _ms,
     _refresh,
     _state,
@@ -75,6 +76,7 @@ def _snapshot(
     )
     mocker.get(f"{URL}/api/v2/properties/bgnow", json={"bgnow": bgnow})
     mocker.get(f"{URL}{PROPERTIES}", json=props)
+    _mock_reservoir(mocker, v3)
 
     treatments = [
         {"_id": "late-carb", "eventType": "Carb Correction", "carbs": 18, "created_at": LATE_TREATMENT}

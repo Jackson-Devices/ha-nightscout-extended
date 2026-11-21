@@ -23,6 +23,11 @@ MMOL_PER_MGDL = 1 / 18.0182
 PROPERTIES = "bgnow,delta,direction,iob,cob,ar2,basal"
 _V1_TREATMENTS = "/api/v1/treatments.json"
 _TREATMENT_LIMIT = 1000
+_V1_DEVICESTATUS = "/api/v1/devicestatus/"
+_V3_DEVICESTATUS = "/api/v3/devicestatus"
+_RESERVOIR_MAX_AGE = timedelta(hours=1)
+_RESERVOIR_UPLOAD_SKEW = timedelta(minutes=1)
+_LEGACY_RESERVOIR_LIMIT = 1000
 _V3_VERSION = "/api/v3/version"
 _V3_ENTRIES = "/api/v3/entries"
 _V3_TREATMENTS = "/api/v3/treatments"
@@ -61,6 +66,15 @@ class _Bearer:
 class ForecastPoint:
     time: datetime
     mgdl: float
+
+
+@dataclass(frozen=True)
+class ReservoirReading:
+    """An AAPS reservoir reading with its pump-contact time and exact uploader label."""
+
+    units: int | float
+    source_time: datetime
+    uploader: str = field(repr=False)
 
 
 @dataclass
@@ -106,6 +120,7 @@ class NightscoutData:
     forecast: list[ForecastPoint] = field(default_factory=list)
     treatments: list[Treatment] = field(default_factory=list)  # sorted by time, past and future
     _forecast_anchor: datetime | None | Literal[False] = field(default=False, init=False, repr=False)
+    reservoir: ReservoirReading | None = None
 
     def last_treatment(self, attr: str, now: datetime) -> Treatment | None:
         """The most recent treatment at or before `now` with a non-zero `attr` (carbs or insulin)."""
@@ -272,6 +287,50 @@ def _source_id(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _reservoir_contact(value: Any) -> datetime | None:
+    if not isinstance(value, str) or value[10:11] != "T":
+        return None
+    try:
+        contact = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return contact.astimezone(timezone.utc) if contact.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def select_reservoir(
+    rows: list[dict[str, Any]], now: datetime, uploader: str | None,
+) -> ReservoirReading | None:
+    """Find the newest qualifying AAPS pump contact from one exact uploader."""
+    earliest = now - _RESERVOIR_MAX_AGE
+    discovered: set[str | None] = set()
+    observations: dict[str, list[tuple[datetime, int | float | None]]] = {}
+    for row in rows:
+        device = _source_id(row.get("device"))
+        if row.get("isValid") is False or (uploader is not None and device != uploader):
+            continue
+        pump = _object(row.get("pump"))
+        status = _object(pump.get("status"))
+        if "reservoir" not in pump and "timestamp" not in status:
+            continue
+        discovered.add(device)
+        contact = _reservoir_contact(status.get("timestamp"))
+        if device is None or contact is None or not earliest <= contact <= now:
+            continue
+        raw = pump.get("reservoir")
+        amount = raw if type(raw) is int or (type(raw) is float and math.isfinite(raw)) else None
+        observations.setdefault(device, []).append((contact, amount if amount is not None and amount >= 0 else None))
+
+    if uploader is None and len(discovered) == 1:
+        uploader = next(iter(discovered))
+    if uploader is None or not (candidates := observations.get(uploader)):
+        return None
+    latest = max(contact for contact, _ in candidates)
+    amounts = {amount for contact, amount in candidates if contact == latest}
+    if len(amounts) != 1 or (amount := amounts.pop()) is None:
+        return None
+    return ReservoirReading(amount, latest, uploader)
+
+
 def _treatment_identity(row: dict[str, Any]) -> tuple[str, str] | None:
     storage_id = _source_id(row.get("_id"))
     if storage_id is not None:
@@ -367,7 +426,7 @@ class NightscoutClient:
                 if 300 <= resp.status < 400:
                     raise NightscoutConnectionError(f"{label} redirected (HTTP {resp.status})")
                 if resp.status != 200:
-                    if resp.status == 400 and path in (_V3_ENTRIES, _V3_TREATMENTS):
+                    if resp.status == 400 and path in (_V3_ENTRIES, _V3_TREATMENTS, _V3_DEVICESTATUS):
                         try:
                             body = await resp.json(content_type=None)
                         except ValueError:
@@ -562,6 +621,44 @@ class NightscoutClient:
                 seen.update(ids)
                 rows.extend(page)
         return _merge_v3_treatments(rows, start, end)
+
+    async def async_get_reservoir(self, now: datetime, uploader: str | None) -> ReservoirReading | None:
+        """Read the AAPS upload window, then rank exclusively on pump contact time."""
+        # AAPS timestamps the upload after pump contact on the same clock.
+        # Allow one minute of upload clock skew without widening contact freshness.
+        start = _v3_iso(now - _RESERVOIR_MAX_AGE)
+        end = _v3_iso(now + _RESERVOIR_UPLOAD_SKEW)
+        if self._use_v3:
+            rows = []
+            for field in ("date", "created_at"):
+                seen: set[str] = set()
+                query = {
+                    f"{field}$gte": start,
+                    f"{field}$lte": end,
+                    "sort$desc": field,
+                    "fields": "identifier,device,pump.status.timestamp,pump.reservoir,isValid",
+                }
+                async for page in self._v3_pages(_V3_DEVICESTATUS, query, _V3_PAGE_SIZE):
+                    ids = {_source_id(row.get("identifier")) for row in page}
+                    if None in ids or (page and not ids.difference(seen)):
+                        raise NightscoutConnectionError("Non-progressing v3 device-status range")
+                    seen.update(identifier for identifier in ids if identifier is not None)
+                    rows.extend(page)
+        else:
+            rows = await self._get(
+                _V1_DEVICESTATUS,
+                {
+                    "find[created_at][$gte]": start,
+                    "find[created_at][$lte]": end,
+                    "count": str(_LEGACY_RESERVOIR_LIMIT),
+                },
+            )
+            if (
+                not isinstance(rows, list) or len(rows) >= _LEGACY_RESERVOIR_LIMIT
+                or any(not isinstance(row, dict) for row in rows)
+            ):
+                raise NightscoutConnectionError("Incomplete legacy device-status range")
+        return select_reservoir(rows, now, uploader)
 
     async def _legacy_treatment_range(self, start: str, end: str, limit: int) -> Any:
         return await self._get(

@@ -49,6 +49,7 @@ class NightscoutSensorDescription(SensorEntityDescription):
     value_fn: Callable[[NightscoutData], Any]
     attrs_fn: Callable[[NightscoutData], dict[str, Any]] | None = None
     glucose: bool = False  # follows the site's mg/dL or mmol/L setting
+    available_fn: Callable[[NightscoutData], bool] | None = None
 
 
 def _forecast_attrs(
@@ -187,19 +188,38 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
 )
 
 
+def _reservoir_attributes(data: NightscoutData) -> dict[str, Any]:
+    reading = data.reservoir
+    if reading is None:
+        return {}
+    return {"source_time": reading.source_time.isoformat(), "uploader": reading.uploader}
+
+
+_RESERVOIR_SENSOR = NightscoutSensorDescription(
+    key="insulin_remaining",
+    translation_key="insulin_remaining",
+    native_unit_of_measurement="U",
+    state_class=SensorStateClass.MEASUREMENT,
+    value_fn=lambda data: data.reservoir.units if data.reservoir is not None else None,
+    attrs_fn=_reservoir_attributes,
+    available_fn=lambda data: data.reservoir is not None,
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: NightscoutConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    async_add_entities(NightscoutSensor(coordinator, description) for description in SENSORS)
+    async_add_entities(NightscoutSensor(coordinator, description) for description in (*SENSORS, _RESERVOIR_SENSOR))
 
 
 class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
     """One Nightscout value."""
 
     _attr_has_entity_name = True
+    _unrecorded_attributes = frozenset({"uploader"})
     entity_description: NightscoutSensorDescription
 
     def __init__(self, coordinator: NightscoutCoordinator, description: NightscoutSensorDescription) -> None:
@@ -213,6 +233,11 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
             self._attr_suggested_unit_of_measurement = MMOL if coordinator.units == UNIT_MMOL else MGDL
             self._attr_suggested_display_precision = 1 if coordinator.units == UNIT_MMOL else 0
         self._attr_device_info = device_info(coordinator)
+
+    @property
+    def available(self) -> bool:
+        available_fn = self.entity_description.available_fn
+        return super().available and (available_fn is None or available_fn(self.coordinator.data))
 
     @property
     def native_value(self) -> float | int | str | datetime | None:

@@ -12,7 +12,7 @@ from homeassistant.helpers.typing import ConfigType
 from .api import NightscoutAuthError, NightscoutClient, NightscoutConnectionError
 from .card import async_register_card
 from .const import CONF_USE_API_SECRET, DOMAIN, UNIT_MGDL, UNIT_MMOL
-from .coordinator import NightscoutConfigEntry, NightscoutCoordinator
+from .coordinator import NightscoutConfigEntry, NightscoutCoordinator, reservoir_binding_store
 
 PLATFORMS = [Platform.CALENDAR, Platform.SENSOR]
 
@@ -52,6 +52,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: NightscoutConfigEntry) -
 
 async def _async_reload(hass: HomeAssistant, entry: NightscoutConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: NightscoutConfigEntry) -> None:
+    """Remove the locally saved uploader selection when the site is removed."""
+    await reservoir_binding_store(hass, entry.entry_id).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: NightscoutConfigEntry) -> bool:
