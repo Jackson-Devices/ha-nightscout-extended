@@ -24,11 +24,14 @@ from homeassistant.helpers.selector import (
 from .api import NightscoutAuthError, NightscoutClient, NightscoutConnectionError
 from .const import (
     CONF_SCAN_INTERVAL,
+    CONF_SGV_HISTORY_DAYS,
     CONF_USE_API_SECRET,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MIN_SCAN_INTERVAL,
 )
+
+from .sgv_history import DEFAULT_HISTORY_DAYS, MAX_HISTORY_DAYS, MIN_HISTORY_DAYS
 
 PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
@@ -115,24 +118,42 @@ class NightscoutExtendedConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class NightscoutExtendedOptionsFlow(OptionsFlow):
-    """How often to poll."""
+    """Configure polling and the local raw history window."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(data={CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL])})
+            days = float(user_input[CONF_SGV_HISTORY_DAYS])
+            if days.is_integer():
+                return self.async_create_entry(data={
+                    **self.config_entry.options,
+                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                    CONF_SGV_HISTORY_DAYS: int(days),
+                })
+            errors[CONF_SGV_HISTORY_DAYS] = "invalid_history_days"
+
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema({
                     vol.Required(
                         CONF_SCAN_INTERVAL,
                         default=self.config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=MIN_SCAN_INTERVAL, max=900, step=10,
-                            unit_of_measurement="s", mode=NumberSelectorMode.BOX,
-                        )
-                    )
-                }
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=MIN_SCAN_INTERVAL, max=900, step=10,
+                        unit_of_measurement="s", mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Required(
+                        CONF_SGV_HISTORY_DAYS,
+                        default=self.config_entry.options.get(
+                            CONF_SGV_HISTORY_DAYS, DEFAULT_HISTORY_DAYS,
+                        ),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=MIN_HISTORY_DAYS, max=MAX_HISTORY_DAYS, step=1,
+                        unit_of_measurement="d", mode=NumberSelectorMode.BOX,
+                    )),
+                }),
+                user_input,
             ),
+            errors=errors,
         )
