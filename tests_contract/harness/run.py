@@ -28,6 +28,7 @@ import xml.etree.ElementTree as ET
 from bootstrap import HARNESS, clean_env, read_lock
 from server_calendar import check_calendar, trace_calendar
 from server_sgv import prove_legacy_sgv
+from server_signals import prove_signals, seed_signals
 
 ROOT = HARNESS.parents[1]
 CONTRACT = ROOT / "tests_contract" / "contract" / "run.py"
@@ -162,7 +163,7 @@ def server_json(url, path, deadline):
         return json.load(response)
 
 
-def loopback_server(lock, entries, runner, results, pull, treatments=(), *, protected=False):
+def loopback_server(lock, entries, runner, results, pull, treatments=(), *, protected=False, device_status=()):
     project = f"nightscout-h2-{secrets.token_hex(6)}"
     secret = secrets.token_hex(24)
     env = clean_env()
@@ -187,15 +188,15 @@ def loopback_server(lock, entries, runner, results, pull, treatments=(), *, prot
             results.append({"name": "server-images", "status": "passed"})
         requested_startup = True
         compose("up", "--wait", "--wait-timeout", "75", "--pull", "never", "mongo")
-        compose(
-            "exec", "-T", "mongo", "mongoimport", "--db", "nightscout", "--collection", "entries", "--jsonArray",
-            data=json.dumps(entries),
-        )
-        if treatments:
-            compose(
-                "exec", "-T", "mongo", "mongoimport", "--db", "nightscout", "--collection", "treatments", "--jsonArray",
-                data=json.dumps([row["document"] for row in treatments]),
-            )
+        collections = {
+            "entries": entries, "treatments": [row["document"] for row in treatments], "devicestatus": device_status,
+        }
+        for collection, documents in collections.items():
+            if documents:
+                compose(
+                    "exec", "-T", "mongo", "mongoimport", "--db", "nightscout",
+                    "--collection", collection, "--jsonArray", data=json.dumps(documents),
+                )
         compose("up", "-d", "--pull", "never", "nightscout")
         address = compose("port", "nightscout", "1337")
         if not re.fullmatch(r"127\.0\.0\.1:\d+", address):
@@ -275,6 +276,7 @@ def server(args, lock, results):
     latest = entries[-1]
     seeded_entries, ordered_sgv = seed_ordered_sgv(anchor, seed, entries)
     calendar_rows, calendar = seed_calendar(anchor, seed["calendar"])
+    signal_rows, device_status = seed_signals(anchor, seed["signals"])
 
     def replay(url):
         deadline = time.monotonic() + 60
@@ -311,7 +313,7 @@ def server(args, lock, results):
         ha = args.state / "ha" / "bin" / "python"
         command = [ha, Path(__file__).resolve(), "_server-client", url, str(latest["sgv"]), str(latest["date"])]
         if not args.url:
-            command.extend([json.dumps(calendar), json.dumps(ordered_sgv)])
+            command.extend([json.dumps(calendar), json.dumps(ordered_sgv), anchor.isoformat()])
         result = step(args.output, "nightscout-client", command)
         if result.get("exit_code") == 1:
             result["status"] = "product_mismatch"
@@ -321,7 +323,7 @@ def server(args, lock, results):
         treatments = [*seed_treatments(anchor, seed), *calendar_rows]
         fixture = {
             "glucose": latest["sgv"], "millis": latest["date"], "treatments": treatments, "calendar": calendar,
-            "ordered_sgv": ordered_sgv,
+            "ordered_sgv": ordered_sgv, "signal_anchor": anchor.isoformat(),
         }
 
         def check_v3(url, admin_hash):
@@ -332,16 +334,22 @@ def server(args, lock, results):
                 result["status"] = "product_mismatch"
             results.append(result)
 
-        loopback_server(lock, seeded_entries, check_v3, results, args.pull, treatments=treatments, protected=True)
+        loopback_server(
+            lock, seeded_entries, check_v3, results, args.pull, treatments=[*treatments, *signal_rows],
+            protected=True, device_status=device_status,
+        )
     elif args.url:
         if not re.fullmatch(r"https?://[a-zA-Z0-9.-]+(?::\d+)?", args.url):
             raise ValueError("--url must be a disposable Nightscout base URL without credentials or a path")
         replay(args.url)
     else:
-        loopback_server(lock, seeded_entries, replay, results, args.pull, treatments=calendar_rows)
+        loopback_server(
+            lock, seeded_entries, replay, results, args.pull, treatments=[*calendar_rows, *signal_rows],
+            device_status=device_status,
+        )
 
 
-async def check_client(url, glucose, millis, calendar_json=None, sgv_json=None):
+async def check_client(url, glucose, millis, calendar_json=None, sgv_json=None, signal_anchor=None):
     sys.path.insert(0, str(ROOT))
     from aiohttp import ClientSession, ClientTimeout
     from custom_components.nightscout_extended.api import NightscoutClient, NightscoutConnectionError
@@ -362,7 +370,8 @@ async def check_client(url, glucose, millis, calendar_json=None, sgv_json=None):
             return 1
     actual_time = int(data.glucose_time.timestamp() * 1000) if data.glucose_time else None
     print(json.dumps({"actual_glucose": data.glucose, "actual_date": actual_time}))
-    return 0 if calendar_passed and (data.glucose, actual_time) == (int(glucose), int(millis)) else 1
+    signals_passed = signal_anchor is None or await prove_signals(url, None, signal_anchor, protected=False)
+    return 0 if calendar_passed and signals_passed and (data.glucose, actual_time) == (int(glucose), int(millis)) else 1
 
 
 def main():

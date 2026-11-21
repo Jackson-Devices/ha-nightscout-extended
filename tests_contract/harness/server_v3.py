@@ -12,6 +12,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 from server_calendar import check_calendar, trace_calendar
 from server_sgv import prove_v3_sgv
+from server_signals import prove_signals
 
 
 AUTH = "/api/v2/authorization"
@@ -283,6 +284,18 @@ def main(url, fixture_json):
     except Exception as exc:
         print(f"v3 client read failed ({type(exc).__name__})")
         return 1
+    device_write = f"{AUTH}/debug/check/{quote('api:devicestatus:create', safe=':')}"
+    try:
+        require(request(parsed.port, device_write, headers=bearer)[0] in (401, 403),
+                "read-only device-status access")
+    except (QualificationError, OSError, ValueError) as exc:
+        print(f"native signal authorization check failed ({type(exc).__name__})")
+        return 2
+    try:
+        signals_passed = asyncio.run(prove_signals(url, access, fixture["signal_anchor"], protected=True))
+    except Exception as exc:
+        print(f"v3 client signal read failed ({type(exc).__name__})")
+        signals_passed = False
     try:
         revoke_and_prove_denial(parsed.port, admin, access, bearer, subject_id, expires)
     except QualificationError as exc:
@@ -291,7 +304,8 @@ def main(url, fixture_json):
     except Exception as exc:
         print(f"v3 raw-server qualification failed ({type(exc).__name__})")
         return 2
-    return 0 if asyncio.run(prove_revoked_client(url, access)) else 1
+    revoked_passed = asyncio.run(prove_revoked_client(url, access))
+    return 0 if signals_passed and revoked_passed else 1
 
 
 if __name__ == "__main__":

@@ -76,5 +76,41 @@
       "edited_sgv": 163,
       "direction": "Flat"
     }
+  },
+  "signals": {
+    "age_hours": {
+      "Insulin Change": 54,
+      "Site Change": 66,
+      "Sensor Start": 84,
+      "Sensor Change": 72,
+      "Pump Battery Change": 120
+    },
+    "older_insulin_hours": 90,
+    "device_status": [
+      {
+        "case": "primary-zero",
+        "uploader": "openaps://fixture-aaps-primary",
+        "contact_minutes_ago": 4,
+        "upload_minutes_ago": 3,
+        "units": 0,
+        "native_date": true
+      },
+      {
+        "case": "primary-late-upload",
+        "uploader": "openaps://fixture-aaps-primary",
+        "contact_minutes_ago": 16,
+        "upload_minutes_ago": 1,
+        "units": 12.5,
+        "native_date": false
+      },
+      {
+        "case": "other-fraction",
+        "uploader": "openaps://fixture-aaps-other",
+        "contact_minutes_ago": 2,
+        "upload_minutes_ago": 1,
+        "units": 5.25,
+        "native_date": false
+      }
+    ]
   }
 }
