@@ -274,7 +274,13 @@ class HomeAssistantObserver:
         self.entry_state = self.entry.state.value
         operation = request["operation"]
         if operation == "maintenance":
-            roles = (request["maintenance"],) if request["maintenance"] else MAINTENANCE_ROLES
+            maintenance = request["maintenance"]
+            if maintenance is None:
+                roles = MAINTENANCE_ROLES
+            elif isinstance(maintenance, str):
+                roles = (maintenance,)
+            else:
+                roles = maintenance
         else:
             roles = OPERATIONS[operation]
         observations = {}
@@ -295,11 +301,17 @@ class HomeAssistantObserver:
             return
         try:
             if self.entry is not None and self.entry.state is ConfigEntryState.LOADED:
-                await self.hass.config_entries.async_unload(self.entry.entry_id)
-            await self.hass.async_stop(force=True)
+                if not await self.hass.config_entries.async_unload(self.entry.entry_id):
+                    raise RuntimeError("Home Assistant could not unload the observer entry")
+            # HA stop only awaits tasks scheduled after it starts shutting down.
+            # Finish work triggered by unloading before starting that shutdown.
+            await self.hass.async_block_till_done()
         finally:
-            await self.context.__aexit__(None, None, None)
-            self.hass = None
+            try:
+                await self.hass.async_stop(force=True)
+            finally:
+                await self.context.__aexit__(None, None, None)
+                self.hass = None
 
 
 class FrozenRunnerObserver:
