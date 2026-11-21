@@ -474,18 +474,35 @@ class SupplementalReplay:
             field = query.get("sort$desc")
             if field not in {"date", "created_at"}:
                 return 400, {}, 0, b"{}"
-            lower, upper = query.get(f"{field}$gte"), query.get(f"{field}$lte")
+            lower, upper = query.get(f"{field}$gte"), None
+            fields = set(query.get("fields", "").split(","))
+            query_keys = {f"{field}$gte", "sort$desc", "fields", "limit", "skip"}
+            if set(query) != query_keys or len(query) != len(query_keys) or fields != {
+                "identifier", "device", "pump", "isValid", "date", "created_at",
+            }:
+                return 400, {}, 0, b"{}"
             limit, skip = int(query["limit"]), int(query["skip"])
+            cutoff = _timestamp(lower)
+            if cutoff is None:
+                return 400, {}, 0, b"{}"
+            # The native v3 query has no server-side ceiling. Keep all rows
+            # after the requested lower bound so the client must enforce its
+            # upload window from the returned acquisition timestamps.
+            dated = [
+                (when, row) for row in inventory
+                if (when := _timestamp(row.get(field))) is not None and when >= cutoff
+            ]
+            dated.sort(key=lambda item: item[0], reverse=True)
+            rows = [row for _, row in dated]
         else:
             field = "created_at"
             lower, upper = query.get("find[created_at][$gte]"), query.get("find[created_at][$lte]")
             limit, skip = int(query["count"]), 0
-        rows = _range_rows(inventory, field, lower, upper, inclusive_end=True, descending=True)
+            rows = _range_rows(inventory, field, lower, upper, inclusive_end=True, descending=True)
         if rows is None or limit <= 0 or skip < 0:
             return 400, {}, 0, b"{}"
         page = rows[skip:skip + limit]
-        if wire == "3" and "fields" in query:
-            fields = set(query["fields"].split(","))
+        if wire == "3":
             page = [{key: value for key, value in row.items() if key in fields} for row in page]
         call.update(range_field=field, lower=lower, upper=upper, limit=limit, skip=skip,
                     returned=len(page))
