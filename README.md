@@ -135,7 +135,7 @@ Home Assistant reads Nightscout independently of the API used by your uploader. 
 |---|---|---|---|
 | Setup, reauthentication, site title, units and alarm thresholds | `/api/v1/status.json` and `/api/v2/properties/bgnow` to validate access | Same site metadata and access validation, plus the v3 version check and token exchange | [Setup and identity][v3-check-setup], [renewal and denied reads][v3-check-auth] |
 | Glucose and last reading | The v2 properties poll's `bgnow` value and time when available | Newest usable measurement and its original time from locally retained v3 readings | [Glucose selection and units][v3-check-glucose] |
-| Ordered glucose history | Bounded `/api/v1/entries.json` reads reconcile the retained window | Bounded `/api/v3/entries` reads plus changes from `/api/v3/entries/history/<cursor>` | [History action tests](tests_ha/test_sgv_ingestion.py) |
+| Ordered glucose history | Bounded `/api/v1/entries.json` reads add or update readings in the retained window | Bounded `/api/v3/entries` reads plus changes from `/api/v3/entries/history/<cursor>` | [History action tests](tests_ha/test_sgv_ingestion.py) |
 | Glucose change and trend | v2 `delta` and `direction` properties | Keep the v2 change and trend when its glucose value and timestamp agree with the v3 reading. Otherwise use the v3 reading's direction if present and leave the change unknown. | [Delta with delayed readings][v3-check-glucose], [Client parity tests](tests/test_api.py) |
 | Insulin on board, carbs on board, and current basal | v2 `iob`, `cob`, and `basal` properties | Same computed values and available source attributes | [Calculated properties and settings][v3-check-derived] |
 | 15- and 30-minute AR2 forecasts, and chart points | v2 `ar2.forecast.predicted`, timed from the v2 `bgnow` reading | Same forecast, using its v2 reading time even when the v3 glucose clock differs | [Home Assistant forecast baseline][v3-check-ha-forecast], [synthetic forecast comparison][v3-check-forecast] |
@@ -189,10 +189,12 @@ includes the start and excludes the end. Supply ISO 8601 timestamps with an offs
 
 Committed local history stays readable during an outage. Home Assistant asks Nightscout for uncovered
 dates on demand. Recently fetched ranges can be reused briefly in memory and do not extend local retention.
-V3 applies recorded soft deletes through the change feed. A later complete range check can detect hard
-deletes or older uploads absent from that feed. V1 checks the retained range on each poll. Server limits
-or missing raw-read permission can leave gaps, even when a legacy current glucose reading is available.
-Recovery depends on records Nightscout makes available.
+V1 rereads the retained range on each poll. It adds returned readings and updates records with the same ID.
+An omitted record stays in local history until it ages out because V1 cannot establish whether it was
+hard-deleted. V3 applies reported soft deletes through the change feed and checks the retained range
+periodically for hard deletes and older uploads. Server limits or missing raw-read permission can leave
+gaps, even when a legacy current glucose reading is available. Recovery depends on the records
+Nightscout makes available.
 
 ## Forecasts and missing values
 
