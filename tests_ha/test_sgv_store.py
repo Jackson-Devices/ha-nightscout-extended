@@ -1,6 +1,7 @@
 """Exercise ordered SGV commits against a synthetic Nightscout source."""
 
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import pytest
 from homeassistant.util.file import WriteError
@@ -60,8 +61,8 @@ class Source:
 
 @pytest.fixture
 def entry():
-    """Name synthetic entries independently of configured Nightscout sites."""
-    return "fixture-entry"
+    """Give each test its own actual Home Assistant storage file."""
+    return uuid4().hex
 
 
 async def test_batch_order_edits_and_quiet_refresh(hass, entry):
@@ -237,6 +238,52 @@ async def test_ranges_cover_only_completed_intervals_and_do_not_expand_retention
     assert unknown["missing_ranges"] == reply["missing_ranges"]
 
 
+async def test_legacy_quiet_polls_preserve_exact_committed_reading(hass, entry):
+    measured = NOW - timedelta(minutes=2, milliseconds=375)
+    original = row("legacy-recent", measured, 144)
+    source = Source(original)
+    source.uses_v3 = False
+    history = SGVHistory(hass, entry, source, 1)
+    await history.async_refresh(NOW)
+    revision = history.revision
+
+    source.rows.clear()
+    for seconds in (15, 30):
+        await history.async_refresh(NOW + timedelta(seconds=seconds))
+        assert history.revision == revision
+        assert history.select_current(NOW, None, None) == (measured, 144, "Flat")
+
+    reopened = SGVHistory(hass, entry, source, 1)
+    result = await reopened.async_range(NOW - timedelta(hours=1), NOW, allow_remote=False)
+    assert result["status"] == "complete"
+    assert result["readings"] == [
+        {"id": "legacy-recent", "date": original["date"], "sgv": 144, "direction": "Flat"}
+    ]
+    assert reopened.revision == revision
+
+
+async def test_legacy_late_only_poll_merges_and_expires_by_measurement_time(hass, entry):
+    recent_time = NOW - timedelta(minutes=3)
+    recent = row("legacy-current", recent_time, 142)
+    expiring = row("expiring", NOW - DAY + timedelta(seconds=1), 123)
+    late = row("legacy-backfill", NOW - timedelta(hours=2), 137)
+    source = Source(recent, expiring)
+    source.uses_v3 = False
+    history = SGVHistory(hass, entry, source, 1)
+    await history.async_refresh(NOW)
+
+    source.rows = [late]
+    later = NOW + timedelta(seconds=2)
+    await history.async_refresh(later)
+    result = await history.async_range(later - DAY, later, allow_remote=False)
+    assert result["status"] == "complete"
+    assert [(r["id"], r["date"], r["sgv"]) for r in result["readings"]] == [
+        ("legacy-backfill", late["date"], 137),
+        ("legacy-current", recent["date"], 142),
+    ]
+    assert history.select_current(later, None, None) == (recent_time, 142, "Flat")
+
+
 async def test_snapshot_is_scoped_and_removal_fences_preexisting_readers(hass, entry):
     original = Source(row("private-to-first-site", NOW, 144))
     history = SGVHistory(hass, entry, original, 1)
@@ -244,7 +291,7 @@ async def test_snapshot_is_scoped_and_removal_fences_preexisting_readers(hass, e
     alternate = Source()
     alternate.site_id = "other-test-site"
     reopened = SGVHistory(hass, entry, alternate, 1)
-    other_entry = SGVHistory(hass, "other-entry", original, 1)
+    other_entry = SGVHistory(hass, f"{entry}-other", original, 1)
     for store in (reopened, other_entry):
         await store.async_load()
         assert store.revision is None

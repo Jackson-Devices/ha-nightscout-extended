@@ -335,17 +335,26 @@ class SGVHistory:
         return rows
 
     async def _reconcile(
-        self, start: int, end: int, now: int, uses_v3: bool
+        self, start: int, end: int, now: int
     ) -> tuple[_Snapshot, list[dict[str, Any]]]:
         # Fence first, so stamped writes during the snapshot are replayable.
-        fence = await self._source.change_fence() if uses_v3 else None
+        fence = await self._source.change_fence()
         rows = await self._read_window(start, end)
         cursor = fence
         changes = []
         if fence is not None:
             changes, cursor = await self._read_changes(fence)
             _apply_changes(rows, changes, start, end)
-        return _Snapshot(uses_v3, cursor, start, end, now, now, _ordered(rows)), changes
+        return _Snapshot(True, cursor, start, end, now, now, _ordered(rows)), changes
+
+    async def _refresh_legacy(
+        self, state: _Snapshot | None, start: int, end: int, now: int
+    ) -> _Snapshot:
+        # V1 reads give positive observations, with no deletion tombstones.
+        # Omitted IDs retain their exact last observed values and dates until expiry.
+        rows = {} if state is None else {row.id: row for row in state.rows if start <= row.date < end}
+        rows.update(await self._read_window(start, end))
+        return _Snapshot(False, None, start, end, now, now, _ordered(rows))
 
     async def _read_changes(self, after: int) -> tuple[list[dict[str, Any]], int]:
         changes, checkpoint = await self._source.read_changes(after)
@@ -388,9 +397,11 @@ class SGVHistory:
             await self._load_locked()
             state = self._state
             uses_v3 = self._source.uses_v3
-            if (
+            if not uses_v3:
+                candidate = await self._refresh_legacy(state, start, end, checked)
+                changes = []
+            elif (
                 state is None
-                or not uses_v3
                 or not state.uses_v3
                 or state.cursor is None
                 or checked < state.checked
@@ -398,14 +409,14 @@ class SGVHistory:
                 or start < state.start
                 or state.end < start
             ):
-                candidate, changes = await self._reconcile(start, end, checked, uses_v3)
+                candidate, changes = await self._reconcile(start, end, checked)
             else:
                 try:
                     candidate, changes = await self._incremental(
                         state, start, end, checked, state.cursor
                     )
                 except SGVReconciliationRequired:
-                    candidate, changes = await self._reconcile(start, end, checked, uses_v3)
+                    candidate, changes = await self._reconcile(start, end, checked)
             if len(candidate.rows) > _ROW_LIMIT:
                 raise NightscoutConnectionError("Retained SGV history exceeds the local row limit")
             cancelled = await self._commit(replace(candidate, revision=self._revision_for(candidate)))
