@@ -110,7 +110,24 @@
         "upload_minutes_ago": 1,
         "units": 5.25,
         "native_date": false
+      },
+      {
+        "case": "isolated-zero",
+        "uploader": "openaps://fixture-aaps-history-primary",
+        "contact_minutes_ago": 244,
+        "upload_minutes_ago": 243,
+        "units": 0,
+        "native_date": true
+      },
+      {
+        "case": "isolated-stale-other",
+        "uploader": "openaps://fixture-aaps-history-stale",
+        "contact_minutes_ago": 362,
+        "upload_minutes_ago": 361,
+        "units": 8.5,
+        "native_date": true
       }
-    ]
+    ],
+    "isolated_reservoir_clock_minutes_ago": 240
   }
 }
