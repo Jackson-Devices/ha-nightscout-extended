@@ -1,5 +1,6 @@
 """Exercise the insulin remaining entity through actual Home Assistant entry setup."""
 
+from datetime import datetime
 import json
 
 import pytest
@@ -17,10 +18,12 @@ DEVICE_A = "openaps://Fixture A"
 DEVICE_B = "openaps://Fixture B"
 
 
-def _status(identifier, device, units, contact="2026-01-08T12:00:00Z"):
+def _status(identifier, device, units, contact="2026-01-08T12:00:00Z", *, uploaded="2026-01-08T12:00:59Z"):
     return {
         "identifier": identifier,
         "device": device,
+        "date": int(datetime.fromisoformat(uploaded).timestamp() * 1000),
+        "created_at": uploaded,
         "pump": {"reservoir": units, "status": {"timestamp": contact}, "clock": "2026-01-08T12:01:00Z"},
     }
 
@@ -81,7 +84,10 @@ async def test_discovered_uploader_is_saved_before_state_and_restored_on_entry_r
     hass, aioclient_mock, freezer, hass_storage,
 ):
     freezer.move_to("2026-01-08T12:01:00+00:00")
-    _mock_site(aioclient_mock, reservoir=[_status("a", DEVICE_A, 8.25)])
+    _mock_site(aioclient_mock, reservoir=[
+        _status("a", DEVICE_A, 8.25),
+        _status("b-old", DEVICE_B, 30, "2026-01-08T10:00:00Z", uploaded="2026-01-08T10:00:01Z"),
+    ])
     entry = await _configure(hass)
     key = f"{DOMAIN}.reservoir.{entry.entry_id}"
     try:
