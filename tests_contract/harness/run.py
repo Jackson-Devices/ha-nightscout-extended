@@ -13,6 +13,7 @@ uses the staged environments and starts only the loopback contract fixture.
 
 import argparse
 import asyncio
+import hashlib
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -41,7 +42,7 @@ def core_env():
     return env
 
 
-def step(output, name, command, *, pytest=False, expected_exit=0, baseline=False):
+def step(output, name, command, *, pytest=False, expected_exit=0, baseline=False, input_data=None):
     start = time.monotonic()
     log = output / f"{name}.log"
     report = output / f"{name}.xml"
@@ -53,7 +54,7 @@ def step(output, name, command, *, pytest=False, expected_exit=0, baseline=False
         with log.open("wb") as stream:
             completed = subprocess.run(
                 command, cwd=ROOT, env=core_env(), stdout=stream, stderr=subprocess.STDOUT,
-                check=False, timeout=300,
+                check=False, timeout=300, input=input_data,
             )
         code = completed.returncode
         result["exit_code"] = code
@@ -158,12 +159,15 @@ def server_json(url, path, deadline):
         return json.load(response)
 
 
-def loopback_server(lock, entries, runner, results, pull):
+def loopback_server(lock, entries, runner, results, pull, treatments=()):
     project = f"nightscout-h2-{secrets.token_hex(6)}"
+    secret = secrets.token_hex(24)
     env = clean_env()
     env.update(
         H2_MONGO_IMAGE=lock["server"]["mongo"], H2_NIGHTSCOUT_IMAGE=lock["server"]["nightscout"],
-        H2_NIGHTSCOUT_SECRET=secrets.token_hex(24),
+        H2_NIGHTSCOUT_SECRET=secret,
+        H2_NIGHTSCOUT_DEFAULT_ROLE="denied" if treatments else "readable",
+        H2_NIGHTSCOUT_LOG_DRIVER="none" if treatments else "json-file",
     )
     command = ["docker", "compose", "--project-name", project, "--file", HARNESS / "server-compose.yml"]
 
@@ -184,17 +188,37 @@ def loopback_server(lock, entries, runner, results, pull):
             "exec", "-T", "mongo", "mongoimport", "--db", "nightscout", "--collection", "entries", "--jsonArray",
             data=json.dumps(entries),
         )
+        if treatments:
+            compose(
+                "exec", "-T", "mongo", "mongoimport", "--db", "nightscout", "--collection", "treatments", "--jsonArray",
+                data=json.dumps([row["document"] for row in treatments]),
+            )
         compose("up", "-d", "--pull", "never", "nightscout")
         address = compose("port", "nightscout", "1337")
         if not re.fullmatch(r"127\.0\.0\.1:\d+", address):
             raise ValueError("The disposable Nightscout port was not bound to loopback")
-        runner(f"http://{address}")
+        url = f"http://{address}"
+        if treatments:
+            runner(url, hashlib.sha1(secret.encode("ascii")).hexdigest())
+        else:
+            runner(url)
     finally:
         if requested_startup:
             try:
                 compose("down", "--volumes", "--remove-orphans")
             except (OSError, subprocess.SubprocessError) as exc:
                 results.append({"name": "server-cleanup", "status": "infrastructure_failure", "error": type(exc).__name__})
+
+
+def seed_treatments(anchor, seed):
+    treatments = []
+    for treatment in seed["treatments"]:
+        when = anchor.astimezone(timezone.utc) - timedelta(minutes=treatment["minutes_before_anchor"])
+        millis = int(when.timestamp() * 1000)
+        field = treatment["field"]
+        stamp = millis if field == "date" else when.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        treatments.append({"field": field, "millis": millis, "document": {**treatment["document"], field: stamp}})
+    return treatments
 
 
 def server(args, lock, results):
@@ -244,7 +268,20 @@ def server(args, lock, results):
             result["status"] = "product_mismatch"
         results.append(result)
 
-    if args.url:
+    if args.v3:
+        treatments = seed_treatments(anchor, seed)
+        fixture = {"glucose": latest["sgv"], "millis": latest["date"], "treatments": treatments}
+
+        def check_v3(url, admin_hash):
+            ha = args.state / "ha" / "bin" / "python"
+            command = [ha, HARNESS / "server_v3.py", url, json.dumps(fixture)]
+            result = step(args.output, "nightscout-v3", command, input_data=(admin_hash + "\n").encode("ascii"))
+            if result.get("exit_code") == 1:
+                result["status"] = "product_mismatch"
+            results.append(result)
+
+        loopback_server(lock, entries, check_v3, results, args.pull, treatments=treatments)
+    elif args.url:
         if not re.fullmatch(r"https?://[a-zA-Z0-9.-]+(?::\d+)?", args.url):
             raise ValueError("--url must be a disposable Nightscout base URL without credentials or a path")
         replay(args.url)
@@ -275,6 +312,7 @@ def main():
     core_args.add_argument("--expected-failures", type=Path, help="Allow an exact known HA baseline case set")
     server_args = commands.add_parser("server", help="Seed and check a separate disposable Nightscout server")
     server_args.add_argument("--pull", action="store_true", help="Stage the pinned disposable images before starting")
+    server_args.add_argument("--v3", action="store_true", help="Check a protected v3 server with a disposable read-only subject")
     server_args.add_argument("--url", help="Read-only base URL of a reachable disposable server already seeded")
     server_args.add_argument("--anchor", help="Seed anchor in ISO 8601 with offset, required with --url")
     for command in (core_args, server_args):
@@ -282,8 +320,8 @@ def main():
         command.add_argument("--runner-id", required=True)
         command.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
-    if args.lane == "server" and args.url and (not args.anchor or args.pull):
-        server_args.error("--url requires --anchor and cannot be used with --pull")
+    if args.lane == "server" and args.url and (not args.anchor or args.pull or args.v3):
+        server_args.error("--url requires --anchor and cannot be used with --pull or --v3")
     args.output = args.output.resolve()
     args.state = args.state.resolve()
     args.output.mkdir(parents=True, exist_ok=False)

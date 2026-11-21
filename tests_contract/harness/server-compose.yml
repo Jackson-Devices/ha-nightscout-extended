@@ -18,8 +18,10 @@ services:
       INSECURE_USE_HTTP: 'true'
       MONGO_CONNECTION: mongodb://mongo:27017/nightscout
       API_SECRET: ${H2_NIGHTSCOUT_SECRET:?set by run.py}
-      AUTH_DEFAULT_ROLES: readable
+      AUTH_DEFAULT_ROLES: ${H2_NIGHTSCOUT_DEFAULT_ROLE:-readable}
       DISPLAY_UNITS: mg/dL
+    logging:
+      driver: ${H2_NIGHTSCOUT_LOG_DRIVER:-json-file}
     ports:
       - target: 1337
         host_ip: 127.0.0.1
