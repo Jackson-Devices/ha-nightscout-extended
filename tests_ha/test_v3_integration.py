@@ -17,6 +17,7 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import (
     AiohttpClientMockResponse,
 )
 
+from custom_components.nightscout_extended.age import AGE_SIGNALS
 from custom_components.nightscout_extended.const import CONF_USE_API_SECRET, DOMAIN
 
 URL = "https://parity.example.invalid"
@@ -203,6 +204,17 @@ def _mock_site(
         json={"status": 200, "result": [{"duration": 10}]},
     )
     path = re.escape(URL + TREATMENTS_V3)
+
+    async def age_response(method, url, _data):
+        kinds = url.query["eventType$in"].split("|")
+        matches = [row for row in (*modern, treatments[0]) if row.get("eventType") in kinds]
+        start, limit = int(url.query["skip"]), int(url.query["limit"])
+        return AiohttpClientMockResponse(
+            method, url, status=200, json={"status": 200, "result": matches[start:start + limit]},
+        )
+
+    age_query = re.compile(rf"^{path}\?(?:[^#]*&)?eventType(?:\$|%24)in=")
+    mocker.get(age_query, side_effect=age_response)
     for field, results in (
         ("date", modern),
         ("created_at", [treatments[0]]),
@@ -364,7 +376,10 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
         await _assert_calendar_range(hass, entry)
         _assert_wire_mode(aioclient_mock, v3=False, token=TOKEN, discovery=True)
         ids = _entity_ids(hass, entry)
-        assert ids == {
+        age_ids = {f"{URL}_{signal.key}" for signal in AGE_SIGNALS}
+        assert age_ids <= ids.keys()
+        assert ids[f"{URL}_insulin_age"] == "sensor.parity_site_insulin_age"
+        assert {key: value for key, value in ids.items() if key not in age_ids} == {
             f"{URL}_{key}": f"sensor.parity_site_{name}"
             for key, name in (
                 ("glucose", "glucose"), ("glucose_delta", "glucose_change"),

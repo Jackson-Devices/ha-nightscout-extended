@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfBloodGlucoseConcentration
+from homeassistant.const import UnitOfBloodGlucoseConcentration, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import glucose_unique_id
+from .age import AGE_SIGNALS, AgeSignal
 from .api import NightscoutData
 from .const import UNIT_MMOL
 from .coordinator import NightscoutConfigEntry, NightscoutCoordinator
@@ -49,6 +50,7 @@ class NightscoutSensorDescription(SensorEntityDescription):
     value_fn: Callable[[NightscoutData], Any]
     attrs_fn: Callable[[NightscoutData], dict[str, Any]] | None = None
     glucose: bool = False  # follows the site's mg/dL or mmol/L setting
+    available_fn: Callable[[NightscoutData], bool] | None = None
 
 
 def _forecast_attrs(
@@ -92,6 +94,31 @@ def _forecast(minutes: int) -> Callable[[NightscoutData], float | None]:
         point = data.forecast_at(minutes)
         return point.mgdl if point else None
     return fn
+
+
+def _age_description(signal: AgeSignal) -> NightscoutSensorDescription:
+    def hours(data: NightscoutData) -> float | None:
+        marker = signal.marker(data.age_markers)
+        if marker is None:
+            return None
+        elapsed = dt_util.utcnow() - marker.time
+        return elapsed.total_seconds() / 3600 if elapsed.total_seconds() >= 0 else None
+
+    def attributes(data: NightscoutData) -> dict[str, Any]:
+        marker = signal.marker(data.age_markers)
+        if marker is None:
+            return {}
+        return {"source_time": marker.time.isoformat(), "event_type": marker.event_type}
+
+    return NightscoutSensorDescription(
+        key=signal.key,
+        translation_key=signal.key,
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        value_fn=hours,
+        attrs_fn=attributes,
+        available_fn=lambda data: data.age_markers is not None,
+    )
 
 
 SENSORS: tuple[NightscoutSensorDescription, ...] = (
@@ -184,6 +211,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
         value_fn=_forecast(30),
         attrs_fn=_forecast_attrs(30, include_curve=True),
     ),
+    *(_age_description(signal) for signal in AGE_SIGNALS),
 )
 
 
@@ -221,6 +249,9 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
     def available(self) -> bool:
         if not super().available:
             return False
+        check = self.entity_description.available_fn
+        if check is not None:
+            return check(self.coordinator.data)
         key = self.entity_description.key
         if key in {"last_carbs", "last_insulin"}:
             return self.coordinator.treatments_available

@@ -71,6 +71,7 @@ def sites(monkeypatch):
     monkeypatch.setattr(NightscoutClient, "async_get_status", connect)
     monkeypatch.setattr(NightscoutClient, "async_get_data", properties)
     monkeypatch.setattr(NightscoutClient, "async_get_treatments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(NightscoutClient, "async_get_age_markers", AsyncMock(return_value={}))
     monkeypatch.setattr(NightscoutSGVSource, "read_range", read_range)
     monkeypatch.setattr(NightscoutSGVSource, "change_fence", AsyncMock(return_value=READING_MS))
     monkeypatch.setattr(NightscoutSGVSource, "read_changes", AsyncMock(return_value=([], None)))
@@ -262,6 +263,7 @@ async def test_site_outage_leaves_live_entities_unavailable_and_preserves_cache(
     monkeypatch.setattr(NightscoutSGVSource, "read_changes", failed)
     monkeypatch.setattr(NightscoutClient, "async_get_data", failed)
     monkeypatch.setattr(NightscoutClient, "async_get_treatments", failed)
+    monkeypatch.setattr(NightscoutClient, "async_get_age_markers", failed)
     await entry.runtime_data.async_refresh()
 
     assert not entry.runtime_data.last_update_success

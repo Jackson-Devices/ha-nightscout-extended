@@ -12,6 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .age import AGE_EVENT_TYPES
 from .api import (
     NightscoutAuthError,
     NightscoutClient,
@@ -91,15 +92,17 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
 
     async def _async_poll(self) -> NightscoutData:
         now = dt_util.utcnow()
-        properties, treatments, history = await asyncio.gather(
+        properties, treatments, history, age_markers = await asyncio.gather(
             self.client.async_get_data(calculated_only=True),
             self.client.async_get_treatments(now - timedelta(hours=48), now + timedelta(days=62)),
             self.history.async_refresh(now),
+            self.client.async_get_age_markers(AGE_EVENT_TYPES, now),
             return_exceptions=True,
         )
         failed_groups: set[str] = set()
         for name, result in (
             ("calculated values", properties), ("treatments", treatments), ("SGV history", history),
+            ("age markers", age_markers),
         ):
             if not isinstance(result, BaseException):
                 continue
@@ -108,6 +111,7 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
             failed_groups.add(name)
             if (
                 isinstance(result, NightscoutAuthError)
+                and name != "age markers"
                 and (name != "SGV history" or self.uses_v3)
                 and (
                     result.status != 403
@@ -119,7 +123,7 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         for name in failed_groups - self._failed_groups:
             _LOGGER.warning("Nightscout %s could not be refreshed", name)
         self._failed_groups = failed_groups
-        if len(failed_groups) == 3:
+        if len(failed_groups) == 4:
             raise UpdateFailed("No Nightscout data source responded successfully")
 
         self.calculations_available = isinstance(properties, NightscoutData)
@@ -143,4 +147,5 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         elif self.data is not None:
             # Retain the previous successful range for the calendar's independent fallback.
             data.treatments = self.data.treatments
+        data.age_markers = age_markers if isinstance(age_markers, dict) else None
         return data

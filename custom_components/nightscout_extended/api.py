@@ -23,6 +23,7 @@ MMOL_PER_MGDL = 1 / 18.0182
 PROPERTIES = "bgnow,delta,direction,iob,cob,ar2,basal"
 _V1_TREATMENTS = "/api/v1/treatments.json"
 _TREATMENT_LIMIT = 1000
+_AGE_LEGACY_COUNTS = (100, 1000, 10000)
 _V3_VERSION = "/api/v3/version"
 _V3_ENTRIES = "/api/v3/entries"
 _V3_TREATMENTS = "/api/v3/treatments"
@@ -90,6 +91,14 @@ class Treatment:
         return self.event_type
 
 
+@dataclass(frozen=True)
+class AgeMarker:
+    """Source occurrence time and event type for a treatment age."""
+
+    time: datetime
+    event_type: str
+
+
 @dataclass
 class NightscoutData:
     """One poll's worth of values. Glucose values are always mg/dL here."""
@@ -105,6 +114,7 @@ class NightscoutData:
     basal: float | None = None
     forecast: list[ForecastPoint] = field(default_factory=list)
     treatments: list[Treatment] = field(default_factory=list)  # sorted by time, past and future
+    age_markers: dict[str, AgeMarker] | None = None
     _forecast_anchor: datetime | None | Literal[False] = field(default=False, init=False, repr=False)
 
     def last_treatment(self, attr: str, now: datetime) -> Treatment | None:
@@ -573,6 +583,59 @@ class NightscoutClient:
         if self._use_v3:
             return await self._v3_treatments(start, end, limit)
         return parse_treatments(await self._legacy_treatment_range(_iso(start), _iso(end), limit))
+
+    async def _legacy_age_rows(
+        self, event_types: tuple[str, ...], now: datetime,
+    ) -> list[dict[str, Any]]:
+        query = {
+            f"find[eventType][$in][{index}]": kind for index, kind in enumerate(event_types)
+        }
+        # Older v1 servers supply a four-day floor unless created_at is explicit.
+        # Nightscout's native v1 writes store it as a UTC ISO string.
+        query["find[created_at][$gte]"] = "0001-01-01T00:00:00.000Z"
+        query["find[created_at][$lte]"] = _v3_iso(now)
+        # V1 treatment search has a count but no offset. Only a short response
+        # completes the filtered history. Each larger read replaces its prefix.
+        for count in _AGE_LEGACY_COUNTS:
+            rows = await self._get(_V1_TREATMENTS, {**query, "count": str(count)})
+            if (
+                not isinstance(rows, list)
+                or len(rows) > count
+                or any(not isinstance(row, dict) for row in rows)
+            ):
+                raise NightscoutConnectionError("Invalid legacy Nightscout age history")
+            if len(rows) < count:
+                return rows
+        raise NightscoutConnectionError("Legacy Nightscout age history bound exceeded")
+
+    async def async_get_age_markers(
+        self, event_types: tuple[str, ...], now: datetime,
+    ) -> dict[str, AgeMarker]:
+        """Read the latest nonfuture marker for each requested treatment type."""
+        if not event_types:
+            return {}
+        if self._use_v3:
+            rows = []
+            query = {"eventType$in": "|".join(event_types)}
+            async for page in self._v3_pages(_V3_TREATMENTS, query, _V3_PAGE_SIZE):
+                rows.extend(page)
+        else:
+            rows = await self._legacy_age_rows(event_types, now)
+
+        # V3 searches without a storage clock predicate to include mixed-origin
+        # rows. Both modes use the event occurrence clock, not server write time.
+        markers: dict[str, AgeMarker] = {}
+        for _, row in _current_treatment_rows(rows):
+            kind = row.get("eventType")
+            if not isinstance(kind, str) or kind not in event_types:
+                continue
+            created = _parse_iso(row.get("created_at"))
+            date = _ms_to_dt(row.get("date"))
+            mills = _ms_to_dt(row.get("mills"))
+            when = (date or created or mills) if self._use_v3 else (created or mills or date)
+            if when is not None and when <= now and (kind not in markers or when > markers[kind].time):
+                markers[kind] = AgeMarker(when, kind)
+        return markers
 
     async def _calendar_lookback(self, default_length: timedelta, before: datetime) -> timedelta:
         minimum_minutes = default_length.total_seconds() / 60
