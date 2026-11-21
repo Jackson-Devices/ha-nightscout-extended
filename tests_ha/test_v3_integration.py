@@ -12,7 +12,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
+from pytest_homeassistant_custom_component.test_util.aiohttp import (
+    AiohttpClientMocker,
+    AiohttpClientMockResponse,
+)
 
 from custom_components.nightscout_extended.const import CONF_USE_API_SECRET, DOMAIN
 
@@ -70,7 +73,7 @@ def _ms(value):
 
 def _mock_site(
     mocker: AiohttpClientMocker, *, v3=False, v3_reading=READING, v3_glucose=153,
-    forecast=FORECAST,
+    forecast=FORECAST, treatments=LEGACY_TREATMENTS,
 ):
     """Install responses at the HTTP boundary of HA's existing aiohttp fixture."""
     mocker.clear_requests()
@@ -95,7 +98,8 @@ def _mock_site(
     mocker.get(f"{URL}{PROPERTIES}", json=props)
     if not v3:
         mocker.get(f"{URL}{VERSION}", status=404)
-        mocker.get(f"{URL}{TREATMENTS_V1}", json=list(LEGACY_TREATMENTS))
+        mocker.get(f"{URL}{TREATMENTS_V1}", params={"sort[duration]": "desc"}, json=[])
+        mocker.get(f"{URL}{TREATMENTS_V1}", json=list(treatments))
         return
 
     now = int(time())
@@ -109,15 +113,19 @@ def _mock_site(
         json={"status": 200, "result": [{"type": "sgv", "sgv": v3_glucose, "date": _ms(v3_reading)}]},
     )
     modern = []
-    for row in reversed(LEGACY_TREATMENTS[1:]):
+    for row in reversed(treatments[1:]):
         treatment = dict(row)
         treatment["identifier"] = treatment.pop("_id")
         treatment["date"] = _ms(treatment.pop("created_at"))
         modern.append(treatment)
+    mocker.get(
+        f"{URL}{TREATMENTS_V3}", params={"sort$desc": "duration"},
+        json={"status": 200, "result": [{"duration": 10}]},
+    )
     path = re.escape(URL + TREATMENTS_V3)
     for field, results in (
         ("date", modern),
-        ("created_at", [LEGACY_TREATMENTS[0]]),
+        ("created_at", [treatments[0]]),
     ):
         query = re.compile(rf"^{path}\?(?:[^#]*&)?{field}(?:\$|%24)gte=")
         mocker.get(query, json={"status": 200, "result": results})
@@ -304,6 +312,138 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
         await hass.async_block_till_done()
         # Flush writes scheduled by the reload before the HA fixture shuts down.
         hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+        await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize("v3", [False, True])
+async def test_calendar_reads_authoritative_overlaps_and_preserves_cached_fallback(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer, v3
+):
+    """An independently filtered calendar request can discover an interval the cache misses."""
+    freezer.move_to(AFTERNOON)
+    start = "2026-01-08T18:45:00+00:00"
+    end = "2026-01-08T19:00:00+00:00"
+
+    def treatment(uid, clock, notes, **fields):
+        created = f"2026-01-08T{clock}+00:00"
+        return {"_id": uid, "created_at": created, "eventType": "Note", "notes": notes, **fields}
+
+    cached_long = treatment("long", "18:30:00", "Cached duration", duration=10)
+    cached_marker = treatment("stale", "18:46:00", "Cached marker")
+    default = treatment("default", "18:43:00", "Five-minute default")
+    rows = [
+        {**cached_long, "notes": "Authoritative interval", "duration": 20,
+         "date": _ms(cached_long["created_at"])},
+        treatment("ends-at-start", "18:35:00", "Ends exactly at the start", duration=10),
+        default,
+        treatment("within", "18:48:00", "First page only", date=_ms("2026-01-08T18:48:00+00:00")),
+        treatment("starts-at-end", "19:00:00", "Starts exactly at the end",
+                  date=_ms("2026-01-08T19:00:00+00:00")),
+    ]
+    future_dose = treatment("future-dose", "21:00:00", "Future", carbs=999, insulin=999)
+    cached = (*LEGACY_TREATMENTS, cached_long, cached_marker, default, future_dose)
+    _mock_site(aioclient_mock, v3=v3, treatments=cached)
+    entry = await _configure(hass)
+    failed_scan = False
+    fault_sent = False
+
+    async def treatment_response(method, url, data):
+        nonlocal fault_sent
+        query = url.query
+
+        def reply(result, status=200):
+            payload = {"status": status, "result": result} if v3 else result
+            return AiohttpClientMockResponse(method, url, status=status, json=payload)
+
+        if v3 and "duration$gt" in query:
+            assert query["sort$desc"] == "duration" and query["limit"] == "1"
+            assert query["skip"] == "0" and query["duration$gt"] == "5"
+            candidates = [row for row in rows if row.get("duration", 0) > 5]
+            return reply(sorted(candidates, key=lambda row: row["duration"], reverse=True)[:1])
+        if not v3 and "find[duration][$gt]" in query:
+            assert query["sort[duration]"] == "desc" and query["count"] == "1"
+            assert query["find[duration][$gt]"] == "5"
+            assert query["find[created_at][$lt]"] == "2026-01-08T18:40:00.000Z"
+            candidates = [
+                row for row in rows if row.get("duration", 0) > 5
+                and _ms(row["created_at"]) < _ms(query["find[created_at][$lt]"])
+            ]
+            return reply(sorted(candidates, key=lambda row: row["duration"], reverse=True)[:1])
+
+        if not v3:
+            low, high = (_ms(query[f"find[created_at][${op}]"]) for op in ("gte", "lte"))
+            count = int(query["count"])
+            if failed_scan:
+                fault_sent = True
+                return reply([rows[0]] * count)
+            return reply([row for row in rows if low <= _ms(row["created_at"]) <= high][:count])
+
+        field = "date" if "date$gte" in query else "created_at"
+        assert query["sort$desc"] == field
+        inclusive_end = f"{field}$lte" in query
+        end_predicate = "lte" if inclusive_end else "lt"
+        low, high = _ms(query[f"{field}$gte"]), _ms(query[f"{field}${end_predicate}"])
+        limit, skip = int(query["limit"]), int(query["skip"])
+        if failed_scan:
+            if limit > 1:
+                return AiohttpClientMockResponse(method, url, status=400, json={
+                    "status": 400, "message": "Parameter limit out of tolerance",
+                })
+            if skip:
+                fault_sent = True
+                return reply([], status=503)
+
+        def stored_time(row):
+            return row.get("date") if field == "date" else _ms(row["created_at"])
+
+        eligible = sorted(
+            (
+                row for row in rows if (when := stored_time(row)) is not None
+                and low <= when and (when < high or inclusive_end and when == high)
+            ),
+            key=stored_time, reverse=True,
+        )
+        return reply(eligible[skip:skip + limit])
+
+    async def calendar(request_end=end):
+        response = await hass.services.async_call(
+            "calendar", "get_events",
+            {"entity_id": CALENDAR, "start_date_time": start, "end_date_time": request_end},
+            blocking=True, return_response=True,
+        )
+        return response[CALENDAR]["events"]
+
+    try:
+        # Cache really contains future intake, yet the earlier nonzero values remain current.
+        assert any(row.uid == "future-dose" for row in entry.runtime_data.data.treatments)
+        assert _state(hass, "last_carbs").state == "30"
+        assert _state(hass, "last_insulin").state == "0.5"
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(
+            f"{URL}{TREATMENTS_V3 if v3 else TREATMENTS_V1}", side_effect=treatment_response,
+        )
+
+        events = await calendar()
+        assert [(event["summary"], event["start"], event["end"]) for event in events] == [
+            ("Authoritative interval", "2026-01-08T18:30:00+00:00", "2026-01-08T18:50:00+00:00"),
+            ("Five-minute default", "2026-01-08T18:43:00+00:00", "2026-01-08T18:48:00+00:00"),
+            ("First page only", "2026-01-08T18:48:00+00:00", "2026-01-08T18:53:00+00:00"),
+        ]
+        fractional_end = await calendar("2026-01-08T19:00:00.000001+00:00")
+        assert fractional_end[-1]["summary"] == "Starts exactly at the end"
+
+        rows[0] = {**rows[0], "notes": "Edited interval", "duration": 21}
+        edited = await calendar()
+        assert edited[0]["summary"] == "Edited interval"
+        assert edited[0]["end"] == "2026-01-08T18:51:00+00:00"
+        del rows[0]
+        assert [event["summary"] for event in await calendar()] == ["Five-minute default", "First page only"]
+
+        failed_scan = True
+        assert [event["summary"] for event in await calendar()] == ["Five-minute default", "Cached marker"]
+        assert fault_sent  # v3 reached a later page; v1 filled the bounded result.
+    finally:
+        assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
 
 
