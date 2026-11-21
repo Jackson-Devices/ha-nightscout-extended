@@ -124,6 +124,35 @@ Restart Home Assistant, then go to **Settings → Devices & services → Add int
 
 The update interval (default 60 s) can be changed under the integration's **Configure** button.
 
+### Nightscout API compatibility
+
+Home Assistant reads Nightscout independently of the API used by your uploader. A site receiving v3 uploads can still serve this integration over v1 and v2. The integration selects its read path automatically and uses the same Home Assistant entities and display settings in either mode.
+
+- **Public or legacy site:** enter a URL such as `https://public.example`. Leave the credential empty for public reads, or enter the site's existing read token or API secret for authenticated legacy reads.
+- **v3-capable site:** enter a URL such as `https://nightscout.example` and the site's readable subject token. After the legacy read check, the integration requests the public `/api/v3/version` and checks for a `3.x` API response, then exchanges the subject token for a bearer via `/api/v2/authorization/request/{subject-token}`. A missing capability route or a rejected subject exchange with HTTP 401 keeps already validated legacy reads. A malformed version or an unexpected API major raises an error. Protected collection requests use the bearer on the configured site. The client attempts one renewal after a protected HTTP 401 and reports persistent failures.
+
+| Home Assistant behavior | Legacy reads | Reads with v3 enabled | Compatibility check |
+|---|---|---|---|
+| Setup, reauthentication, site title, units and alarm thresholds | `/api/v1/status.json` and `/api/v2/properties/bgnow` to validate access | Same site metadata and access validation, plus the v3 version check and token exchange | [Setup and identity][v3-check-setup], [renewal and denied reads][v3-check-auth] |
+| Glucose and last reading | The v2 properties poll's `bgnow` value and time | `/api/v3/entries` supplies the newest usable glucose record and its time | [Glucose selection and units][v3-check-glucose] |
+| Glucose change and trend | v2 `delta` and `direction` properties | Keep the v2 change and trend when its glucose value and timestamp agree with the v3 reading. Otherwise use the v3 reading's direction if present and leave the change unknown. | [Delta with delayed readings][v3-check-glucose], [Client parity tests](tests/test_api.py) |
+| Insulin on board, carbs on board, and current basal | v2 `iob`, `cob`, and `basal` properties | Same computed values and available source attributes | [Calculated properties and settings][v3-check-derived] |
+| 15- and 30-minute AR2 forecasts, and chart points | v2 `ar2.forecast.predicted`, timed from the v2 `bgnow` reading | Same forecast, using its v2 reading time even when the v3 glucose clock differs | [Home Assistant forecast baseline][v3-check-ha-forecast], [synthetic forecast comparison][v3-check-forecast] |
+| Last carbs, last insulin and treatments calendar | `/api/v1/treatments.json` filtered by `created_at` | `/api/v3/treatments` combines bounded pages for `date` and `created_at` to include older records | [Legacy treatments, paging, and calendar boundaries][v3-check-treatments] |
+| Dashboard card and diagnostics | Home Assistant entities and recorder history for the card, v1 site status and value presence for diagnostics | Same consumers and site settings. The card continues to read history from Home Assistant. | [Home Assistant integration tests][v3-check-setup] |
+
+The v2 poll reads `/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal` in both modes. Treatment reads preserve the five-minute calendar duration when a treatment has no duration and use the most recent nonzero past treatment for each intake sensor. The compatibility checks in the table link to the test cases and baseline controls.
+
+The existing forecast policy selects a point within three minutes of each horizon and evaluates the two horizons independently. The offline Home Assistant baseline exercised both forecast values, either horizon becoming `unknown`, and a shifted reading time. It also records a deliberate comparison difference: the frozen synthetic contract expects `unknown` for off-grid points that the released integration accepts within its tolerance. Both horizons were reported `unknown` on an existing site. The cause there remains unverified. [Home Assistant forecast baseline][v3-check-ha-forecast]
+
+[v3-check-setup]: https://github.com/aperetti/ha-nightscout-extended/blob/a8acabe41d6380f6647f9863c37bc9d776ffc9cc/tests_ha/test_integration.py#L32-L104
+[v3-check-auth]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L244-L266
+[v3-check-glucose]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L267-L285
+[v3-check-derived]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L286-L292
+[v3-check-ha-forecast]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/adapter/test_forecast_compatibility.py
+[v3-check-forecast]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L293-L306
+[v3-check-treatments]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L307-L318
+
 ## Example: forecast chart
 
 The `forecast` attribute is a list of `{time, mgdl}` points, which you can plot with e.g. ApexCharts card:
