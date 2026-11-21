@@ -1,0 +1,453 @@
+"""Exercise the ordered Nightscout feed through Home Assistant's public history action."""
+
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+import re
+
+import pytest
+from aiohttp import ClientConnectionError
+from homeassistant import config_entries
+from homeassistant.bootstrap import async_load_base_functionality
+from homeassistant.const import CONF_API_KEY, CONF_URL, EVENT_HOMEASSISTANT_FINAL_WRITE, STATE_UNKNOWN
+from homeassistant.core import Context, CoreState, HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
+from homeassistant.helpers import entity_registry as er
+from homeassistant.loader import DATA_CUSTOM_COMPONENTS
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    async_fire_time_changed,
+    async_test_home_assistant,
+)
+from pytest_homeassistant_custom_component.test_util.aiohttp import (
+    AiohttpClientMocker,
+    AiohttpClientMockResponse,
+)
+
+from custom_components.nightscout_extended.const import DOMAIN
+
+NOW = "2026-01-08T12:11:00+00:00"
+WINDOW_START = "2026-01-08T12:00:00+00:00"
+WINDOW_END = "2026-01-08T12:10:30+00:00"
+LATEST = "2026-01-08T12:10:00.007+00:00"
+OLDER = "2026-01-02T08:00:00+00:00"
+OLDER_SAMPLE = "2026-01-02T08:05:00+00:00"
+RETENTION_START = "2026-01-07T12:11:00+00:00"
+EARLY_STAMP = "2026-01-08T11:40:00+00:00"
+
+SUBJECT = "fixture-reader"
+BEARER = "fixture-bearer"
+ENTRIES = "/api/v3/entries"
+LEGACY_ENTRIES = "/api/v1/entries.json"
+HISTORY = f"{ENTRIES}/history/"
+PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal"
+
+
+def _ms(value):
+    when = datetime.fromisoformat(value) if isinstance(value, str) else value
+    return (when - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(milliseconds=1)
+
+
+def _query_time(value):
+    return int(value) if value.isdecimal() else _ms(value)
+
+
+class _Nightscout:
+    """A mutable synthetic site with bounded raw SEARCH and strict HISTORY pages."""
+
+    def __init__(self, mocker: AiohttpClientMocker, *, name="Timeline", v3=True):
+        self.name = name
+        self.url = f"https://{name.lower()}.example.invalid"
+        self.v3 = v3
+        self.docs = {}
+        self.bgnow = {}
+        self.offline = False
+        self.fail_search = False
+        self.fail_history_from = None
+        self.failed_history = 0
+        self.requests = []
+        self._stamp = 0
+        mocker.get(re.compile(rf"^{re.escape(self.url)}/api/"), side_effect=self._answer)
+
+    def put(
+        self, identity, date, value, *, direction=None, units=None, modified=None,
+        deleted=False, identifier=True,
+    ):
+        stamp = max(_ms(dt_util.utcnow()), self._stamp + 1) if modified is None else _ms(modified)
+        self._stamp = max(self._stamp, stamp)
+        row = {
+            "_id": f"storage-{identity}" if identifier and self.v3 else identity,
+            "type": "sgv",
+            "date": _ms(date),
+            "sgv": value,
+            "srvModified": stamp,
+            "isValid": not deleted,
+        }
+        if identifier and self.v3:
+            row["identifier"] = identity
+        if direction is not None:
+            row["direction"] = direction
+        if units is not None:
+            row["units"] = units
+        self.docs[identity] = row
+        return stamp
+
+    def _search_rows(self, url):
+        query = url.query
+        if self.v3:
+            low, high = query.get("date$gte"), query.get("date$lt")
+            descending = query.get("sort$desc") == "date"
+            start, count = int(query.get("skip", 0)), int(query.get("limit", 1000))
+        else:
+            low, high = query.get("find[date][$gte]"), query.get("find[date][$lt]")
+            descending = True
+            start, count = 0, int(query.get("count", 10))
+        assert (query.get("type") if self.v3 else query.get("find[type]")) == "sgv"
+        rows = [
+            row for row in self.docs.values()
+            if row["isValid"]
+            and (low is None or row["date"] >= _query_time(low))
+            and (high is None or row["date"] < _query_time(high))
+        ]
+        return sorted(rows, key=lambda row: (row["date"], row["_id"]), reverse=descending)[start:start + count]
+
+    async def _answer(self, method, url, _data):
+        self.requests.append((url.path, dict(url.query)))
+        if self.offline:
+            raise ClientConnectionError("synthetic site offline")
+
+        def reply(result, *, v3=False, status=200):
+            if v3:
+                result = {"status": status, "result": result}
+            return AiohttpClientMockResponse(method, url, json=result, status=status)
+
+        if url.path == "/api/v1/status.json":
+            return reply({"version": "15.0.9", "settings": {"units": "mg/dl", "customTitle": self.name}})
+        if url.path in {"/api/v2/properties/bgnow", PROPERTIES}:
+            return reply({"bgnow": self.bgnow})
+        if url.path == "/api/v3/version":
+            if not self.v3:
+                return reply({}, status=404)
+            return reply({"apiVersion": "3.0.5"}, v3=True)
+        if url.path == f"/api/v2/authorization/request/{SUBJECT}":
+            now = int(dt_util.utcnow().timestamp())
+            return reply({"token": BEARER, "iat": now, "exp": now + 86400})
+        if url.path == "/api/v3/lastModified":
+            now = _ms(dt_util.utcnow())
+            return reply({"srvDate": now, "collections": {"entries": self._stamp or now}}, v3=True)
+        if url.path.startswith(HISTORY):
+            cursor = int(url.path.removeprefix(HISTORY))
+            if self.fail_history_from is not None and cursor >= self.fail_history_from:
+                self.failed_history += 1
+                return reply({}, status=503)
+            limit = int(url.query.get("limit", 1000))
+            rows = (row for row in self.docs.values() if row["srvModified"] > cursor)
+            return reply(sorted(rows, key=lambda row: row["srvModified"])[:limit], v3=True)
+        if url.path in {ENTRIES, LEGACY_ENTRIES}:
+            if self.fail_search:
+                return reply({}, status=503)
+            return reply(self._search_rows(url), v3=self.v3)
+        if url.path in {"/api/v1/treatments.json", "/api/v3/treatments"}:
+            return reply([], v3=url.path == "/api/v3/treatments")
+        raise AssertionError(f"Unhandled synthetic Nightscout route: {url.path}")
+
+
+async def _configure(hass, site):
+    form = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    assert form["type"] is FlowResultType.FORM
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_URL: site.url, CONF_API_KEY: SUBJECT},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    entry = result["result"]
+    await hass.async_block_till_done()
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    return entry
+
+
+def _entity(hass, entry, key="glucose"):
+    entity_id = er.async_get(hass).async_get_entity_id("sensor", DOMAIN, f"{entry.unique_id}_{key}")
+    assert entity_id is not None
+    return entity_id
+
+
+async def _history(hass, entry, start=WINDOW_START, end=WINDOW_END, *, entity_id=None, context=None):
+    reply = await hass.services.async_call(
+        DOMAIN,
+        "get_glucose_history",
+        {"entity_id": entity_id or _entity(hass, entry), "start": start, "end": end},
+        blocking=True,
+        return_response=True,
+        context=context,
+    )
+    assert reply["unit"] == "mg/dL"
+    return reply
+
+
+def _sample(identity, date, value, direction=None):
+    return {"id": identity, "date": _ms(date), "sgv": value, "direction": direction}
+
+
+def _assert_rows(reply, rows, *, status="complete", missing=()):
+    assert reply["status"] == status
+    assert reply["missing_ranges"] == [{"start": _ms(start), "end": _ms(end)} for start, end in missing]
+    assert reply["readings"] == rows
+
+
+def _current(hass, entry, value, when):
+    assert hass.states.get(_entity(hass, entry)).state == value
+    actual = hass.states.get(_entity(hass, entry, "last_reading")).state
+    if when == STATE_UNKNOWN:
+        assert actual == STATE_UNKNOWN
+    else:
+        assert datetime.fromisoformat(actual) == datetime.fromisoformat(when)
+
+
+async def _tick(hass, freezer, site):
+    site.requests.clear()
+    freezer.tick(timedelta(seconds=61))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert any(path == PROPERTIES for path, _ in site.requests)
+
+
+async def _unload(hass, *entries):
+    for entry in entries:
+        if entry.state is config_entries.ConfigEntryState.LOADED:
+            assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+    await hass.async_block_till_done()
+
+
+@asynccontextmanager
+async def _runtime(config_dir):
+    """Use the HA bootstrap and shutdown used by the existing restart observer."""
+    async with async_test_home_assistant(
+        config_dir=str(config_dir),
+        load_registries=False,
+        initial_state=CoreState.not_running,
+    ) as hass:
+        try:
+            hass.data.pop(DATA_CUSTOM_COMPONENTS)
+            assert await async_load_base_functionality(hass)
+            await hass.async_start()
+            await hass.async_block_till_done()
+            yield hass
+        finally:
+            try:
+                await _unload(hass, *hass.config_entries.async_entries(DOMAIN))
+            finally:
+                await hass.async_stop(force=True)
+
+
+async def test_scheduled_polls_materialize_every_sgv_and_apply_source_mutations(
+    hass: HomeAssistant, aioclient_mock, freezer,
+):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock)
+    entry = await _configure(hass, site)
+    try:
+        for _ in range(2):
+            await _tick(hass, freezer, site)
+            _assert_rows(await _history(hass, entry), [])
+            _current(hass, entry, STATE_UNKNOWN, STATE_UNKNOWN)
+
+        site.put("latest", LATEST, 124, direction="Flat")
+        await _tick(hass, freezer, site)
+        latest = _sample("latest", LATEST, 124, "Flat")
+        _assert_rows(await _history(hass, entry), [latest])
+        _current(hass, entry, "124", LATEST)
+
+        late = "2026-01-08T12:05:00.401+00:00"
+        six = "2026-01-08T12:06:00.003+00:00"
+        eight = "2026-01-08T12:08:00.501+00:00"
+        # This is server-write order. Measurement order differs, including a tie.
+        site.put("tie-b", eight, 121, identifier=False)
+        site.put("late-05", late, 6.5, units="mmol/L")
+        site.put("tie-a", eight, 119)
+        site.put("six", six, 116)
+        await _tick(hass, freezer, site)
+        samples = [
+            _sample("late-05", late, pytest.approx(117.1183)),
+            _sample("six", six, 116),
+            _sample("tie-a", eight, 119),
+            _sample("tie-b", eight, 121),
+            latest,
+        ]
+        _assert_rows(await _history(hass, entry), samples)
+        _current(hass, entry, "124", LATEST)
+
+        # An overlap replay cannot turn an old measurement into a new one.
+        for _ in range(2):
+            await _tick(hass, freezer, site)
+            _assert_rows(await _history(hass, entry), samples)
+            _current(hass, entry, "124", LATEST)
+
+        corrected = "2026-01-08T12:07:00.625+00:00"
+        site.put("tie-a", corrected, 123)
+        site.put("tie-b", eight, 121, deleted=True, identifier=False)
+        await _tick(hass, freezer, site)
+        _assert_rows(await _history(hass, entry), [*samples[:2], _sample("tie-a", corrected, 123), latest])
+        _current(hass, entry, "124", LATEST)
+        _assert_rows(await _history(hass, entry, end=LATEST), [*samples[:2], _sample("tie-a", corrected, 123)])
+    finally:
+        await _unload(hass, entry)
+
+
+async def test_failed_second_history_page_keeps_committed_rows_and_retries_the_backlog(
+    hass: HomeAssistant, aioclient_mock, freezer,
+):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock)
+    site.put("committed", LATEST, 124, modified=EARLY_STAMP)
+    entry = await _configure(hass, site)
+    try:
+        original = [_sample("committed", LATEST, 124)]
+        _assert_rows(await _history(hass, entry), original)
+        # Exceed the pinned server's default maximum page size (1000).
+        backlog_start = datetime(2026, 1, 8, 12, 1, tzinfo=UTC)
+        first_stamp = dt_util.utcnow()
+        expected = []
+        for index in range(1001):
+            date = backlog_start + timedelta(milliseconds=index * 137)
+            identity = f"backlog-{index:04}"
+            # Timestamp cohorts straddle an even-sized page boundary.
+            modified = first_stamp + timedelta(milliseconds=(index + 1) // 2)
+            site.put(identity, date, 100 + index % 17, modified=modified)
+            expected.append(_sample(identity, date, 100 + index % 17))
+
+        site.fail_history_from = _ms(first_stamp)
+        site.fail_search = True
+        await _tick(hass, freezer, site)
+        assert site.failed_history > 0
+        history_requests = [path for path, _ in site.requests if path.startswith(HISTORY)]
+        assert len(set(history_requests)) >= 2
+        _assert_rows(await _history(hass, entry), original)
+
+        site.fail_history_from = None
+        site.fail_search = False
+        await _tick(hass, freezer, site)
+        _assert_rows(await _history(hass, entry), [*expected, *original])
+        await _tick(hass, freezer, site)
+        _assert_rows(await _history(hass, entry), [*expected, *original])
+        _current(hass, entry, "124", LATEST)
+    finally:
+        await _unload(hass, entry)
+
+
+@pytest.mark.parametrize("v3", [False, True], ids=["legacy", "v3"])
+async def test_retained_history_works_offline_and_older_ranges_are_fetched_on_demand(
+    hass: HomeAssistant, aioclient_mock, freezer, v3,
+):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock, v3=v3)
+    site.put("older", OLDER_SAMPLE, 107, modified=EARLY_STAMP)
+    site.put("retained", LATEST, 124, modified=EARLY_STAMP)
+    site.bgnow = {"last": 124, "mills": _ms(LATEST)}
+    entry = await _configure(hass, site)
+    try:
+        retained = _sample("retained", LATEST, 124)
+        older = _sample("older", OLDER_SAMPLE, 107)
+        committed = await _history(hass, entry)
+        _assert_rows(committed, [retained])
+        as_of = datetime.fromisoformat(committed["as_of"])
+        assert as_of.utcoffset() == timedelta(0)
+
+        site.offline = True
+        site.requests.clear()
+        _assert_rows(await _history(hass, entry), [retained])
+        assert site.requests == []
+        partial = await _history(hass, entry, start=OLDER)
+        _assert_rows(partial, [retained], status="partial", missing=[(OLDER, RETENTION_START)])
+        assert partial["as_of"] == committed["as_of"]
+        _assert_rows(
+            await _history(hass, entry, OLDER, RETENTION_START), [],
+            status="unavailable", missing=[(OLDER, RETENTION_START)],
+        )
+
+        site.offline = False
+        site.requests.clear()
+        _assert_rows(await _history(hass, entry, start=OLDER), [older, retained])
+        search_path = ENTRIES if v3 else LEGACY_ENTRIES
+        keys = ("date$gte", "date$lt") if v3 else ("find[date][$gte]", "find[date][$lt]")
+        bounds = {
+            tuple(_query_time(query[key]) for key in keys)
+            for path, query in site.requests
+            if path == search_path
+        }
+        assert bounds == {(_ms(OLDER), _ms(RETENTION_START))}
+        _assert_rows(await _history(hass, entry, OLDER, OLDER_SAMPLE), [])
+
+        site.offline = True
+        _assert_rows(
+            await _history(hass, entry, start=OLDER), [retained],
+            status="partial", missing=[(OLDER, RETENTION_START)],
+        )
+    finally:
+        await _unload(hass, entry)
+
+
+async def test_reload_and_home_assistant_restart_restore_committed_rows(
+    aioclient_mock, freezer, hass_storage, tmp_path,
+):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock)
+    site.put("persisted", LATEST, 124, modified=EARLY_STAMP)
+    expected = [_sample("persisted", LATEST, 124)]
+    async with _runtime(tmp_path) as first:
+        entry = await _configure(first, site)
+        entry_id = entry.entry_id
+        entity_id = _entity(first, entry)
+        _assert_rows(await _history(first, entry), expected)
+        _current(first, entry, "124", LATEST)
+
+        # Leave setup, v2 properties, and quiet HISTORY online, but make
+        # reacquiring the raw sample through SEARCH impossible.
+        site.fail_search = True
+        assert await first.config_entries.async_reload(entry_id)
+        await first.async_block_till_done()
+        _assert_rows(await _history(first, entry), expected)
+        _current(first, entry, "124", LATEST)
+
+    async with _runtime(tmp_path) as restarted:
+        entry = restarted.config_entries.async_get_entry(entry_id)
+        assert entry is not None
+        assert await restarted.config_entries.async_setup(entry_id)
+        await restarted.async_block_till_done()
+        assert entry.state is config_entries.ConfigEntryState.LOADED
+        assert _entity(restarted, entry) == entity_id
+        _assert_rows(await _history(restarted, entry), expected)
+        _current(restarted, entry, "124", LATEST)
+        await _tick(restarted, freezer, site)
+        _assert_rows(await _history(restarted, entry), expected)
+        _current(restarted, entry, "124", LATEST)
+
+
+async def test_history_requires_read_access_to_the_requested_site_glucose_entity(
+    hass: HomeAssistant, aioclient_mock, freezer, hass_read_only_user,
+):
+    freezer.move_to(NOW)
+    first_site = _Nightscout(aioclient_mock, name="First")
+    second_site = _Nightscout(aioclient_mock, name="Second")
+    first_site.put("source-id", LATEST, 124, modified=EARLY_STAMP)
+    second_site.put("source-id", LATEST, 178, modified=EARLY_STAMP)
+    first_entry = await _configure(hass, first_site)
+    second_entry = await _configure(hass, second_site)
+    try:
+        allowed_entity = _entity(hass, first_entry)
+        hass_read_only_user.mock_policy({"entities": {"entity_ids": {allowed_entity: True}}})
+        context = Context(user_id=hass_read_only_user.id)
+        own = await _history(hass, first_entry, context=context)
+        _assert_rows(own, [_sample("source-id", LATEST, 124)])
+        _assert_rows(await _history(hass, second_entry), [_sample("source-id", LATEST, 178)])
+
+        for site in (first_site, second_site):
+            site.requests.clear()
+        with pytest.raises(Unauthorized):
+            await _history(hass, second_entry, start=OLDER, context=context)
+        with pytest.raises(ServiceValidationError):
+            await _history(hass, first_entry, start=OLDER, entity_id=_entity(hass, first_entry, "last_reading"))
+        assert first_site.requests == second_site.requests == []
+    finally:
+        await _unload(hass, first_entry, second_entry)
