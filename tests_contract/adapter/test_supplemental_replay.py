@@ -227,7 +227,9 @@ class SupplementalReplay:
     def _treatments(self, wire, request, auth, call):
         query = request.query
         calendar = self.channel == "calendar"
-        if calendar and ("duration$gt" in query or "find[duration][$gt]" in query):
+        if calendar and any(
+            key in query for key in ("duration$gt", "find[duration][$gt]", "find[duration][$type]")
+        ):
             return self._maximum_duration(wire, query, auth, call)
         if wire == "1":
             route = "calendar1" if calendar else "treatments1"
@@ -305,20 +307,26 @@ class SupplementalReplay:
             for record_id in DATA["lists"].get(payload, ())
             if type(records[record_id].get("duration")) in (int, float)
         }
-        raw_min = query.get("duration$gt", query.get("find[duration][$gt]"))
-        minimum = float(raw_min)
         ordered = sorted(candidates, key=lambda key: (-records[key]["duration"], key))
-        selected = [key for key in ordered if records[key]["duration"] > minimum]
         if wire == "3":
             if query.get("sort$desc") != "duration" or query.get("skip") != "0":
                 return 400, {}, 0, b"{}"
+            minimum = float(query["duration$gt"])
+            selected = [key for key in ordered if records[key]["duration"] > minimum]
             limit = int(query["limit"])
         else:
-            if query.get("sort[duration]") not in {"desc", "-1"}:
-                return 400, {}, 0, b"{}"
             limit = int(query["count"])
             before = _timestamp(query.get("find[created_at][$lt]"))
             if before is None:
+                return 400, {}, 0, b"{}"
+            if query.get("find[duration][$type]") == "number":
+                if (query.get("sort[0][0]"), query.get("sort[0][1]")) != ("duration", "desc"):
+                    return 400, {}, 0, b"{}"
+                selected = ordered
+            elif query.get("sort[duration]") in {"desc", "-1"} and "find[duration][$gt]" in query:
+                minimum = float(query["find[duration][$gt]"])
+                selected = [key for key in ordered if records[key]["duration"] > minimum]
+            else:
                 return 400, {}, 0, b"{}"
             selected = [key for key in selected if _timestamp(records[key]["at"]) < before]
         rows = [document(key, records, f"v{wire}") for key in selected[:limit]]
@@ -423,7 +431,7 @@ class SupplementalReplay:
             "auth": self._auth(request),
             "query_keys": sorted({
                 key for key in request.query
-                if key.startswith(("date$", "created_at$", "find["))
+                if key.startswith(("date$", "created_at$", "find[", "sort[0]["))
                 or key in {"limit", "skip", "count", "type", "sort$desc", "sort[duration]", "duration$gt"}
             }),
         }
@@ -556,7 +564,9 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state):
     elif case_id == "F-AR2-MIXED":
         # The four input snapshots select nearest points within the released
         # three-minute tolerance. Offset/conflicting points remain in the curve.
-        quantities = ((207, 231), (302, 231), (207, 231), (207, 330))[index - 1]
+        # Step 2 has a ±1ms tie. The released chronological order retains
+        # the earlier point, so the +15-minute value is 301, not 302.
+        quantities = ((207, 231), (301, 231), (207, 231), (207, 330))[index - 1]
         for role, quantity in zip(("forecast_15", "forecast_30"), quantities, strict=True):
             value = actual[role]
             require(value is not None and value[:2] == [quantity, "mg/dL"] and value[3] == "available",
@@ -625,7 +635,17 @@ async def test_supplemental_frozen_replay(case_id, freezer, hass_storage, tmp_pa
             interface_request = request
             if observer.hass is not None and last_units != replay.units:
                 # The real integration reads display units at setup, not on an
-                # ordinary poll. Use the normal native reload to see the change.
+                # ordinary poll. HA also preserves the existing entity's unit
+                # unless the user changes its sensor preference.
+                glucose = observer._row("glucose")
+                if glucose is None:
+                    raise RuntimeError("cannot configure the display unit without a real glucose entity")
+                display_unit = "mmol/L" if replay.units == "mmol" else "mg/dL"
+                er.async_get(observer.hass).async_update_entity_options(
+                    glucose.entity_id, "sensor",
+                    {**glucose.options.get("sensor", {}), "unit_of_measurement": display_unit},
+                )
+                await observer.hass.async_block_till_done()
                 replay.interface_reload = True
                 interface_request = request | {"lifecycle": "reload"}
             last_units = replay.units
