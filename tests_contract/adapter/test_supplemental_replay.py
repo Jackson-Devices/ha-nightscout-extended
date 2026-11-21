@@ -681,7 +681,16 @@ async def test_supplemental_late_calendar_fault(freezer, hass_storage, tmp_path,
     """A wide range has enough supplied rows to reach the frozen later-page 503."""
     socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
     case_id = "T-FUTURE-OVERLAP"
-    _, request, _, _, _, _, _ = PREPARED[case_id][0]
+    _, case_request, _, _, _, _, _ = PREPARED[case_id][0]
+    parameters = case_request["parameters"]
+    calendar = parameters["calendar"]
+    # Use the source inventory's full window. The narrower frozen service
+    # request reaches only one dated row even with the duration lookback.
+    request = case_request | {
+        "parameters": parameters | {
+            "calendar": calendar | {"start": calendar["source_start"], "end": calendar["source_end"]},
+        },
+    }
     broad, failure = CASES[case_id]["steps"][:2]
     fault = next(item for item in failure["wire"] if item[0] == "calendar3-2")
     replay = SupplementalReplay()
