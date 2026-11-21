@@ -102,10 +102,20 @@ export const logic = {
   },
 };
 
+function numericValue(value) {
+  if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return NaN;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
 function num(state) {
-  if (!state) return NaN;
-  const v = Number(state.state);
-  return Number.isFinite(v) ? v : NaN;
+  return numericValue(state?.state);
+}
+
+function forecastTimestamp(attributes, key, fallback) {
+  if (!Object.hasOwn(attributes, key)) return fallback;
+  const value = attributes[key];
+  return typeof value === "string" ? Date.parse(value) : NaN;
 }
 
 function isMmol(state) {
@@ -263,9 +273,10 @@ class NightscoutGlucoseCard extends HTMLElement {
         significant_changes_only: false,
       })
       .then((r) => {
+        // Retain nonnumeric observations as gaps instead of joining around them.
         h.pts = ((r && r[id]) || [])
-          .map((p) => [(p.lu || p.last_updated_ts || 0) * 1000, Number(p.s) * (mmol ? MGDL_PER_MMOL : 1)])
-          .filter((p) => p[0] > 0 && Number.isFinite(p[1]));
+          .map((p) => [(p.lu || p.last_updated_ts || 0) * 1000, numericValue(p.s) * (mmol ? MGDL_PER_MMOL : 1)])
+          .filter(([time]) => Number.isFinite(time) && time > 0);
         h.key = key;
       })
       .catch(() => {})
@@ -350,7 +361,8 @@ class NightscoutGlucoseCard extends HTMLElement {
     const mgdl = value * (mmol ? MGDL_PER_MMOL : 1);
     const last = this._state("last");
     const lastMs = last ? new Date(last.state).getTime() : NaN;
-    const ageMin = (Date.now() - lastMs) / 60000;
+    const now = Date.now();
+    const ageMin = (now - lastMs) / 60000;
     const t = logic.thresholds(g.attributes && g.attributes.thresholds_mgdl);
     const level = logic.classify(mgdl, ageMin, cfg.stale_minutes, t);
     const stale = level === "stale";
@@ -374,16 +386,25 @@ class NightscoutGlucoseCard extends HTMLElement {
     const pct = Number.isFinite(ageMin) ? Math.max(0, Math.min(100, 100 - (ageMin / cfg.stale_minutes) * 100)) : 0;
     el.fill.style.width = `${pct}%`;
 
+    const forecast = this._state("forecast");
+    const forecastAttrs = forecast?.attributes ?? {};
+    const sourceTime = forecastTimestamp(forecastAttrs, "source_time", now);
+    const showForecast = !stale && forecast && forecast.state !== "unavailable" &&
+      Number.isFinite(sourceTime) && (now - sourceTime) / 60000 <= cfg.stale_minutes;
+
     el.footer.hidden = !cfg.show_footer;
     if (cfg.show_footer) {
       const parts = [];
       if (stale) parts.push("⚠ No recent reading");
       const iob = num(this._state("iob"));
       const cob = num(this._state("cob"));
-      const fc = num(this._state("forecast"));
+      const fc = num(forecast);
       if (Number.isFinite(iob)) parts.push(`IOB ${iob.toFixed(2)} U`);
       if (Number.isFinite(cob)) parts.push(`COB ${Math.round(cob)} g`);
-      if (Number.isFinite(fc) && !stale) parts.push(`30 min ≈ ${mmol ? fc.toFixed(1) : Math.round(fc)}`);
+      const targetTime = forecastTimestamp(forecastAttrs, "forecast_time", Infinity);
+      if (showForecast && Number.isFinite(fc) && targetTime > Math.max(now, lastMs)) {
+        parts.push(`30 min ≈ ${mmol ? fc.toFixed(1) : Math.round(fc)}`);
+      }
       el.footer.replaceChildren(...parts.map((p) => Object.assign(document.createElement("span"), { textContent: p })));
     }
 
@@ -394,7 +415,9 @@ class NightscoutGlucoseCard extends HTMLElement {
     );
 
     el.chart.style.display = cfg.show_chart ? "" : "none";
-    if (cfg.show_chart) this._drawChart(c.fg, t, stale ? null : [lastMs, mgdl]);
+    if (cfg.show_chart) {
+      this._drawChart(c.fg, t, now, stale ? null : [lastMs, mgdl], showForecast ? forecastAttrs.forecast : null);
+    }
   }
 
   _sizeCard() {
@@ -413,8 +436,7 @@ class NightscoutGlucoseCard extends HTMLElement {
     this._el.wrap.style.aspectRatio = "auto";
   }
 
-  _drawChart(col, t, current) {
-    const now = Date.now();
+  _drawChart(col, t, now, current, forecast) {
     const t0 = now - this._config.hours_to_show * 3600000;
     const t1 = now + FORECAST_AHEAD_MIN * 60000;
     const X = (ms) => (((ms - t0) / (t1 - t0)) * 1000).toFixed(1);
@@ -422,15 +444,33 @@ class NightscoutGlucoseCard extends HTMLElement {
     const pts = this._history.pts.filter((p) => p[0] >= t0);
     if (current && Number.isFinite(current[0]) && Number.isFinite(current[1])
         && (!pts.length || current[0] > pts[pts.length - 1][0])) pts.push(current);
-    const line = pts.map((p, i) => `${i ? "L" : "M"}${X(p[0])},${Y(p[1])}`).join("");
+
+    const gapMs = this._config.stale_minutes * 60000;
+    const segments = [];
+    let segment;
+    for (const point of pts) {
+      if (!Number.isFinite(point[1])) {
+        segment = undefined;
+        continue;
+      }
+      if (!segment || point[0] - segment[segment.length - 1][0] > gapMs) {
+        segment = [];
+        segments.push(segment);
+      }
+      segment.push(point);
+    }
+    const svgPath = (points) => points.map(([time, value], i) => `${i ? "L" : "M"}${X(time)},${Y(value)}`).join("");
+    // A zero-length stroke with a round cap shows a single measured point.
+    const line = segments.map((points) => svgPath(points.length === 1 ? [points[0], points[0]] : points)).join("");
 
     let fline = "";
-    const f = this._state("forecast");
-    const fc = (f && f.attributes && f.attributes.forecast) || [];
-    if (current && pts.length && fc.length) {
-      const lastPt = pts[pts.length - 1];
-      fline = `M${X(lastPt[0])},${Y(lastPt[1])}` +
-        fc.map((p) => `L${X(new Date(p.time).getTime())},${Y(Number(p.mgdl))}`).join("");
+    if (current && Array.isArray(forecast)) {
+      const after = Math.max(now, current[0]);
+      const future = forecast
+        .map((point) => [Date.parse(point?.time), numericValue(point?.mgdl)])
+        .filter(([time, value]) => time > after && Number.isFinite(value))
+        .sort(([a], [b]) => a - b);
+      if (future.length) fline = svgPath([current, ...future]);
     }
     const dash = 'vector-effect="non-scaling-stroke"';
     this._el.chart.innerHTML = `
