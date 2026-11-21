@@ -17,6 +17,7 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import (
     AiohttpClientMockResponse,
 )
 
+from custom_components.nightscout_extended.age import AGE_SIGNALS
 from custom_components.nightscout_extended.const import CONF_USE_API_SECRET, DOMAIN
 
 URL = "https://parity.example.invalid"
@@ -31,6 +32,8 @@ LAST_MODIFIED = "/api/v3/lastModified"
 HISTORY_V3 = f"{ENTRIES_V3}/history/"
 TREATMENTS_V3 = "/api/v3/treatments"
 TREATMENTS_V1 = "/api/v1/treatments.json"
+DEVICESTATUS_V1 = "/api/v1/devicestatus/"
+DEVICESTATUS_V3 = "/api/v3/devicestatus"
 PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal"
 READING = "2026-01-08T12:00:00+00:00"
 V3_READING = "2026-01-08T12:07:00+00:00"
@@ -145,7 +148,7 @@ def _mock_v3_sgv(mocker, entries, *, deleted=()):
 
 def _mock_site(
     mocker: AiohttpClientMocker, *, v3=False, v3_reading=READING, v3_glucose=153,
-    forecast=FORECAST, treatments=LEGACY_TREATMENTS,
+    forecast=FORECAST, treatments=LEGACY_TREATMENTS, reservoir=(), reservoir_status=200,
 ):
     """Install responses at the HTTP boundary of HA's existing aiohttp fixture."""
     mocker.clear_requests()
@@ -168,6 +171,7 @@ def _mock_site(
             "forecast": {"predicted": [{"mills": _ms(t), "mgdl": bg} for t, bg in forecast]}
         }
     mocker.get(f"{URL}{PROPERTIES}", json=props)
+    _mock_reservoir(mocker, v3, reservoir, reservoir_status)
     if not v3:
         mocker.get(f"{URL}{VERSION}", status=404)
         # Public and stored-secret entries can read v2 properties despite raw denial.
@@ -203,12 +207,29 @@ def _mock_site(
         json={"status": 200, "result": [{"duration": 10}]},
     )
     path = re.escape(URL + TREATMENTS_V3)
+
+    async def age_response(method, url, _data):
+        kinds = url.query["eventType$in"].split("|")
+        matches = [row for row in (*modern, treatments[0]) if row.get("eventType") in kinds]
+        start, limit = int(url.query["skip"]), int(url.query["limit"])
+        return AiohttpClientMockResponse(
+            method, url, status=200, json={"status": 200, "result": matches[start:start + limit]},
+        )
+
+    age_query = re.compile(rf"^{path}\?(?:[^#]*&)?eventType(?:\$|%24)in=")
+    mocker.get(age_query, side_effect=age_response)
     for field, results in (
         ("date", modern),
         ("created_at", [treatments[0]]),
     ):
         query = re.compile(rf"^{path}\?(?:[^#]*&)?{field}(?:\$|%24)gte=")
         mocker.get(query, json={"status": 200, "result": results})
+
+
+def _mock_reservoir(mocker, v3, rows=(), status=200):
+    path = DEVICESTATUS_V3 if v3 else DEVICESTATUS_V1
+    payload = {"status": status, "result": list(rows)} if v3 else list(rows)
+    mocker.get(f"{URL}{path}", json=payload, status=status)
 
 
 async def _configure(hass):
@@ -255,12 +276,12 @@ def _assert_wire_mode(mocker, *, v3, token=None, secret=None, discovery=False, b
     assert PROPERTIES in paths
     if discovery:
         assert VERSION in paths
-    v3_reads = {ENTRIES_V3, TREATMENTS_V3, LAST_MODIFIED}
+    v3_reads = {ENTRIES_V3, TREATMENTS_V3, LAST_MODIFIED, DEVICESTATUS_V3}
     history_paths = {path for path in paths if path.startswith(HISTORY_V3)}
     if v3:
-        assert TREATMENTS_V3 in paths
+        assert {TREATMENTS_V3, DEVICESTATUS_V3} <= paths
         assert history_paths
-        assert paths.isdisjoint({ENTRIES_V1, TREATMENTS_V1})
+        assert paths.isdisjoint({ENTRIES_V1, TREATMENTS_V1, DEVICESTATUS_V1})
         if bootstrap:
             series_paths = [
                 url.path for _, url, _, _ in calls
@@ -272,7 +293,7 @@ def _assert_wire_mode(mocker, *, v3, token=None, secret=None, discovery=False, b
     else:
         assert not history_paths
         assert paths.isdisjoint(v3_reads | {EXCHANGE})
-        assert {ENTRIES_V1, TREATMENTS_V1} <= paths
+        assert {ENTRIES_V1, TREATMENTS_V1, DEVICESTATUS_V1} <= paths
     for method, url, _, headers in calls:
         assert method.upper() == "GET"
         assert url.host == "parity.example.invalid"
@@ -364,7 +385,10 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
         await _assert_calendar_range(hass, entry)
         _assert_wire_mode(aioclient_mock, v3=False, token=TOKEN, discovery=True)
         ids = _entity_ids(hass, entry)
-        assert ids == {
+        age_ids = {f"{URL}_{signal.key}" for signal in AGE_SIGNALS}
+        assert age_ids <= ids.keys()
+        assert ids[f"{URL}_insulin_age"] == "sensor.parity_site_insulin_age"
+        assert {key: value for key, value in ids.items() if key not in age_ids} == {
             f"{URL}_{key}": f"sensor.parity_site_{name}"
             for key, name in (
                 ("glucose", "glucose"), ("glucose_delta", "glucose_change"),
@@ -374,7 +398,10 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
                 ("basal", "current_basal"), ("forecast_15", "forecast_in_15_minutes"),
                 ("forecast_30", "forecast_in_30_minutes"),
             )
-        } | {f"{URL}_treatments": CALENDAR}
+        } | {
+            f"{URL}_treatments": CALENDAR,
+            f"{URL}_insulin_remaining": "sensor.parity_site_insulin_remaining",
+        }
         device_id = _device_id(hass, entry)
 
         _mock_site(aioclient_mock, v3=True)

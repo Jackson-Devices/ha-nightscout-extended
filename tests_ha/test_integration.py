@@ -28,6 +28,7 @@ def _mock(aioclient_mock: AiohttpClientMocker, status=STATUS, ok=True):
     # These legacy fixtures grant access to calculated properties and treatments only.
     raw_entries = re.compile(rf"^{re.escape(URL)}/api/v1/entries\.json\?")
     aioclient_mock.get(raw_entries, status=403 if ok else 401)
+    aioclient_mock.get(f"{URL}/api/v1/devicestatus/", json=[], status=code)
     aioclient_mock.get(
         f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS if ok else {}, status=code
     )

@@ -158,6 +158,8 @@ class _Nightscout:
             ):
                 return reply({}, status=503)
             return reply(self._search_rows(url), v3=self.v3)
+        if url.path in {"/api/v1/devicestatus/", "/api/v3/devicestatus"}:
+            return reply([], v3=url.path == "/api/v3/devicestatus")
         if url.path in {"/api/v1/treatments.json", "/api/v3/treatments"}:
             return reply([], v3=url.path == "/api/v3/treatments")
         raise AssertionError(f"Unhandled synthetic Nightscout route: {url.path}")

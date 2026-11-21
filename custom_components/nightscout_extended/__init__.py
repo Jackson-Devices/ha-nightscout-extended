@@ -29,7 +29,7 @@ from .const import (
     UNIT_MGDL,
     UNIT_MMOL,
 )
-from .coordinator import NightscoutConfigEntry, NightscoutCoordinator
+from .coordinator import NightscoutConfigEntry, NightscoutCoordinator, reservoir_binding_store
 from .sgv_history import DEFAULT_HISTORY_DAYS, SGVHistory
 from .sgv_source import NightscoutSGVSource
 
@@ -172,6 +172,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: NightscoutConfigEntry) 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: NightscoutConfigEntry) -> None:
-    """Delete the owned private cache only when removing its config entry."""
+    """Remove the private SGV cache and reservoir binding for the config entry."""
     source = NightscoutSGVSource(_create_client(hass, entry))
     await _create_history(hass, entry, source).async_remove()
+    await reservoir_binding_store(hass, entry.entry_id).async_remove()

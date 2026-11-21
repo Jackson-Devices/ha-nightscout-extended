@@ -50,6 +50,8 @@ class _Client:
         self.calls = []
         self.fail_history_after = None
         self.shift_range_tie = False
+        self.overwrite_date_bounds = False
+        self.reverse_descending_page = False
 
     async def _protected_v3(self, path, query):
         self.calls.append((path, query))
@@ -59,18 +61,29 @@ class _Client:
         if path == "/api/v3/entries":
             if limit > self.cap:
                 raise api._V3PageLimitError("limit", status=400)
-            assert query["type"] == "sgv" and query["sort"] in {"date", "_id"}
-            lower, upper, skip = (int(query[key]) for key in ("date$gte", "date$lt", "skip"))
-            matches = [row for row in self.snapshot if lower <= row["date"] < upper]
-            if query["sort"] == "_id":
-                assert upper - lower == 1
+            assert query["type"] == "sgv"
+            skip = int(query["skip"])
+            if "date" in query:
+                assert "date$lt" not in query and "date$gte" not in query
+                assert query["sort"] == "_id"
+                date = int(query["date"])
+                matches = [row for row in self.snapshot if row["date"] == date]
                 matches.sort(key=lambda row: row.get("_id", row.get("identifier")))
                 if skip and self.shift_range_tie:
                     matches.pop(0)
             else:
                 assert skip == 0
-                # A protected 15.0.6 SEARCH may deliver date inversions.
-                # Preserve the native fixture order, including before LIMIT.
+                upper = int(query["date$lt"])
+                matches = [row for row in self.snapshot if row["date"] < upper]
+                if "date$gte" in query:
+                    assert query["sort"] == "date"
+                    # Nightscout 15.0.6 applies the last date predicate only.
+                    if not self.overwrite_date_bounds:
+                        lower = int(query["date$gte"])
+                        matches = [row for row in matches if row["date"] >= lower]
+                else:
+                    assert query["sort$desc"] == "date" and "sort" not in query
+                    matches.sort(key=lambda row: row["date"], reverse=not self.reverse_descending_page)
             return _result(matches[skip:skip + limit])
         assert path.startswith("/api/v3/entries/history/")
         assert set(query) == {"limit"}
@@ -201,7 +214,7 @@ def test_v3_range_splits_an_unordered_full_prefix_and_reads_dense_ties(monkeypat
     assert successful[1]["date$lt"] == str(BASE + 10)
     assert any(
         query["sort"] == "_id" and query["skip"] == "1"
-        and query["date$gte"] == str(BASE + 10) and query["date$lt"] == str(BASE + 11)
+        and query["date"] == str(BASE + 10)
         for query in successful
     )
 
@@ -227,6 +240,55 @@ def test_v3_range_refuses_a_shifted_same_timestamp_offset(monkeypatch):
 
     with pytest.raises(api.NightscoutConnectionError, match="Unstable.*timestamp"):
         asyncio.run(source.read_range(BASE, BASE + 1))
+
+
+def test_v3_range_overwritten_lower_bound_restarts_capped_read(monkeypatch):
+    monkeypatch.setattr(wire, "_V3_PAGE_SIZE", 2)
+    client = _Client()
+    client.overwrite_date_bounds = True
+    client.snapshot = [
+        _entry("five-days-old", BASE - 5 * 86_400_000),
+        _entry("four-days-old", BASE - 4 * 86_400_000),
+        _entry("late", BASE + 20),
+        _entry("tie-c", BASE + 10),
+        _entry("lower", BASE),
+        _entry("tie-b", BASE + 10),
+        _entry("at-exclusive-upper", BASE + 21),
+        _entry("tie-a", BASE + 10),
+    ]
+    source = wire.NightscoutSGVSource(client)
+
+    readings = asyncio.run(source.read_range(BASE, BASE + 21))
+    assert [row["id"] for row in readings] == ["lower", "tie-a", "tie-b", "tie-c", "late"]
+    queries = [query for _, query in client.calls]
+    assert queries[0]["date$gte"] == str(BASE)
+    assert queries[1]["date$lt"] == str(BASE + 21) and queries[1]["sort$desc"] == "date"
+    assert [query["skip"] for query in queries if query.get("date") == str(BASE + 10)] == ["0", "1", "2"]
+    assert queries[-1]["date$lt"] == str(BASE + 10)
+    assert all("date$gte" not in query for query in queries[1:])
+
+    # Even a capped page entirely below the lower bound proves empty when
+    # Nightscout sorted it by descending date under the strict upper bound.
+    prior = len(queries)
+    assert asyncio.run(source.read_range(BASE - 1000, BASE)) == []
+    assert len(client.calls) == prior + 1
+    assert client.calls[-1][1]["sort$desc"] == "date"
+
+
+def test_v3_range_never_accepts_a_full_unordered_compatibility_page(monkeypatch):
+    monkeypatch.setattr(wire, "_V3_PAGE_SIZE", 2)
+    client = _Client()
+    client.overwrite_date_bounds = True
+    client.reverse_descending_page = True
+    client.snapshot = [
+        _entry("old", BASE - 10),
+        _entry("inside", BASE + 10),
+        _entry("would-be-hidden", BASE + 20),
+    ]
+    source = wire.NightscoutSGVSource(client)
+
+    with pytest.raises(api.NightscoutConnectionError, match="Unordered.*compatibility"):
+        asyncio.run(source.read_range(BASE, BASE + 21))
 
 
 def test_legacy_reads_old_exact_window_and_expands_timestamp_cohort(monkeypatch):
