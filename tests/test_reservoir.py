@@ -117,7 +117,8 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
                 assert field in {"date", "created_at"}
                 assert query[f"{field}$gte"] == "2026-01-08T11:00:00.000Z"
                 assert query[f"{field}$lte"] == "2026-01-08T12:01:00.000Z"
-                assert {"device", "pump.status.timestamp", "pump.reservoir"} <= set(query["fields"].split(","))
+                fields = query["fields"].split(",")
+                assert fields == ["identifier", "device", "pump", "isValid"]
                 limit, skip = int(query["limit"]), int(query["skip"])
                 if limit > 1:
                     return web.json_response({"message": "Parameter limit out of tolerance"}, status=400)
@@ -133,7 +134,12 @@ def test_device_status_acquisition_is_bounded_and_complete(v3):
                     )
                     if low <= observed <= high:
                         matching.append(row)
-                return web.json_response({"status": 200, "result": matching[skip:skip + limit]})
+                # Nightscout 15.0.6 prunes response fields by top-level name.
+                page = [
+                    {name: row[name] for name in fields if name in row}
+                    for row in matching[skip:skip + limit]
+                ]
+                return web.json_response({"status": 200, "result": page})
             assert request.path == V1 and not request.headers.get("Authorization")
             assert query["find[created_at][$gte]"] == "2026-01-08T11:00:00.000Z"
             assert query["find[created_at][$lte]"] == "2026-01-08T12:01:00.000Z"

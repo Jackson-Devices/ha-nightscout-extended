@@ -636,7 +636,9 @@ class NightscoutClient:
                     f"{field}$gte": start,
                     f"{field}$lte": end,
                     "sort$desc": field,
-                    "fields": "identifier,device,pump.status.timestamp,pump.reservoir,isValid",
+                    # Nightscout 15.0.6 prunes response fields by top-level name.
+                    # Select only the reservoir and contact time from pump locally.
+                    "fields": "identifier,device,pump,isValid",
                 }
                 async for page in self._v3_pages(_V3_DEVICESTATUS, query, _V3_PAGE_SIZE):
                     ids = {_source_id(row.get("identifier")) for row in page}
