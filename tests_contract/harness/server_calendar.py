@@ -23,9 +23,10 @@ def trace_calendar(protected):
             ):
                 observed.add("v3-descending-duration")
         if not protected and path == "/api/v1/treatments.json":
-            if (query.get("find[duration][$gt]"), query.get("sort[duration]"), query.get("count")) == (
-                "5", "desc", "1",
-            ) and "find[created_at][$lt]" in query:
+            if (
+                query.get("find[duration][$type]"), query.get("sort[0][0]"),
+                query.get("sort[0][1]"), query.get("count"),
+            ) == ("number", "duration", "desc", "1") and "find[created_at][$lt]" in query:
                 observed.add("v1-descending-duration")
 
     trace.on_request_end.append(collect)
