@@ -386,6 +386,111 @@ class SupplementalReplay:
         call["fixture"] = "companion:empty-collection"
         return _json_response({"status": 200, "result": []} if wire == "3" else [])
 
+    def _signal_authorized(self, wire, auth, call):
+        credentials = self.request["credentials"]
+        if wire == "3":
+            authorized = auth in self.active_bearers
+        elif "query_token" in credentials:
+            authorized = auth == "query"
+        elif "subject_token" in credentials:
+            # A legacy-only fallback still uses that entry's original token.
+            authorized = auth == "entry-query"
+        elif "api_secret_hash" in credentials:
+            authorized = auth == "hash"
+        elif "legacy_bearer" in credentials:
+            authorized = auth == "legacy-bearer"
+        else:
+            authorized = auth == "none" and credentials.keys() == {"api"}
+        if not authorized:
+            call["fixture"] = "rejected:signal-authorization"
+        return authorized
+
+    def _age_markers(self, wire, query, auth, call):
+        call["route"] = f"v{wire}/age-markers"
+        if not self._signal_authorized(wire, auth, call):
+            return 401, {}, 0, b"{}"
+        route = f"treatments{wire}"
+        # Only explicit maintenance fixtures own scripted age replies. A
+        # companion age probe never consumes a poll/calendar entry or fault.
+        if self.request["operation"] == "maintenance":
+            source = self._planned({route}, auth)
+            if source is None and self._planned({route}) is not None:
+                return self._empty_or_denied({route}, wire, call)
+            if source is not None:
+                if source[2] in DATA["faults"]:
+                    return self._respond_planned(source, call)
+                self.reached.add(source)
+        record_ids = dict.fromkeys(
+            row_id for name, credential, payload in self.planned
+            if (name == route or name.startswith("calendar" + wire)) and credential == auth
+            for row_id in DATA["lists"].get(payload, ())
+        )
+        if wire == "3":
+            kinds = set(query["eventType$in"].split("|"))
+            limit, skip = int(query["limit"]), int(query["skip"])
+        else:
+            kinds = {
+                value for key, value in query.items() if key.startswith("find[eventType][$in][")
+            }
+            limit, skip = int(query["count"]), 0
+        if not kinds or "" in kinds or limit <= 0 or skip < 0:
+            return 400, {}, 0, b"{}"
+        rows = [
+            document(row_id, DATA["records"], f"v{wire}") for row_id in record_ids
+            if DATA["records"][row_id].get("eventType") in kinds
+        ]
+        if wire == "1":
+            floor = query.get("find[created_at][$gte]")
+            ceiling = query.get("find[created_at][$lte]")
+            rows = _range_rows(rows, "created_at", floor, ceiling,
+                               inclusive_end=True, descending=True)
+            if rows is None:
+                return 400, {}, 0, b"{}"
+            call.update(lower=floor, upper=ceiling)
+        page = rows[skip:skip + limit]
+        call.update(fixture="ranged:frozen-age-inventory", limit=limit, skip=skip,
+                    returned=len(page))
+        return _json_response({"status": 200, "result": page} if wire == "3" else page)
+
+    def _device_status(self, wire, query, auth, call):
+        call["route"] = f"v{wire}/devicestatus"
+        if not self._signal_authorized(wire, auth, call):
+            return 401, {}, 0, b"{}"
+        routes = {f"devices{wire}"}
+        source = self._planned(routes, auth)
+        if source is None and self._planned(routes) is not None:
+            return self._empty_or_denied(routes, wire, call)
+        inventory = []
+        if source is not None:
+            response = self._respond_planned(source, call)
+            if source[2] not in DATA["lists"]:
+                return response
+            inventory = json.loads(response[3])
+            if wire == "3":
+                inventory = inventory["result"]
+        else:
+            call["fixture"] = "companion:empty-device-status"
+        if wire == "3":
+            field = query.get("sort$desc")
+            if field not in {"date", "created_at"}:
+                return 400, {}, 0, b"{}"
+            lower, upper = query.get(f"{field}$gte"), query.get(f"{field}$lte")
+            limit, skip = int(query["limit"]), int(query["skip"])
+        else:
+            field = "created_at"
+            lower, upper = query.get("find[created_at][$gte]"), query.get("find[created_at][$lte]")
+            limit, skip = int(query["count"]), 0
+        rows = _range_rows(inventory, field, lower, upper, inclusive_end=True, descending=True)
+        if rows is None or limit <= 0 or skip < 0:
+            return 400, {}, 0, b"{}"
+        page = rows[skip:skip + limit]
+        if wire == "3" and "fields" in query:
+            fields = set(query["fields"].split(","))
+            page = [{key: value for key, value in row.items() if key in fields} for row in page]
+        call.update(range_field=field, lower=lower, upper=upper, limit=limit, skip=skip,
+                    returned=len(page))
+        return _json_response({"status": 200, "result": page} if wire == "3" else page)
+
     def _authorize_entries(self, wire, auth, call):
         if wire == "3" and auth not in self.active_bearers:
             call["fixture"] = "rejected:v3-authorization"
@@ -496,6 +601,16 @@ class SupplementalReplay:
         path = request.path
         if request.method != "GET" or request.can_read_body:
             return 405, {}, 0, b"{}"
+        signal_path = path.rstrip("/").removesuffix(".json")
+        if signal_path in {"/api/v1/devicestatus", "/api/v3/devicestatus"}:
+            wire = "3" if signal_path.startswith("/api/v3/") else "1"
+            return self._device_status(wire, request.query, auth, call)
+        if signal_path == "/api/v1/treatments" and any(
+            key.startswith("find[eventType][$in][") for key in request.query
+        ):
+            return self._age_markers("1", request.query, auth, call)
+        if path == "/api/v3/treatments" and "eventType$in" in request.query:
+            return self._age_markers("3", request.query, auth, call)
         if path.startswith("/api/v2/authorization/request/"):
             call["route"] = "exchange"
             routes = {key for key, (route, _, _) in DATA["routes"].items() if route == path}
@@ -574,7 +689,8 @@ class SupplementalReplay:
             "query_keys": sorted({
                 key for key in request.query
                 if key.startswith(("date$", "created_at$", "find[", "sort[0]["))
-                or key in {"limit", "skip", "count", "type", "sort", "sort$desc", "sort[duration]", "duration$gt"}
+                or key in {"limit", "skip", "count", "type", "sort", "sort$desc", "sort[duration]",
+                           "duration$gt", "eventType$in", "fields"}
             }),
         }
         self.calls.append(call)
