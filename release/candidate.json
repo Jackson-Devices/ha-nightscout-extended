@@ -1,0 +1,128 @@
+{
+  "product_sha": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+  "qa_sha": "0628a3989d0a89eaefa806d3db22643758cce6d3",
+  "suite_sha": "f1a4e7dddf071f2c6d3eb2b27499ee4536d76ab3",
+  "proposed_tag": "v0.3.2",
+  "upstream_tag_sha": "4bf8594a6baa82189aac53b3e76cded687b87e6d",
+  "fork_repo": "Jackson-Devices/ha-nightscout-extended",
+  "product_ref": "refs/heads/work/join-all",
+  "qa_ref": "refs/heads/qa/signal-phase",
+  "upstream_tag_ref": "refs/tags/v0.3.2",
+  "published_suite_copy_sha": "f2e2443df6f4961e3bd54d8daddb3d4e15871bc0",
+  "suite_files": {
+    "tests_contract/contract/cases.json": "6801c0bd203b8f6fe2674542abba46a8e3e1cb57",
+    "tests_contract/contract/controls.py": "f76791237baae9c96de129d11917af85eab8a10f",
+    "tests_contract/contract/expected.json": "b8efd3a467041fbb37d1512299f475d406d5e811",
+    "tests_contract/contract/run.py": "8771627391a0479c4af88cfb14492943f858756f",
+    "tests_contract/contract/service.py": "596dc99ab87ff9f2f975c23857dc80513b5cd4f4"
+  },
+  "release_preflight_status": "pending_independent_receiver",
+  "publication_status": "held",
+  "public_upstream_prs_opened": 0,
+  "composed_signal_evidence": {
+    "comparable_passed": 203,
+    "comparable_total": 203,
+    "rerun_checks": 39,
+    "carried_forward_checks": 164,
+    "separate_site_isolation_probe": "passed",
+    "stock_nightscout_version": "15.0.6",
+    "stock_public_legacy_smoke": "passed",
+    "stock_protected_v3_smoke": "passed",
+    "live_site_comparison": "not_run"
+  },
+  "scope_limits": [
+    "The proposed tag reuses the inherited package version for an isolated local rehearsal. The actual upstream tag resolves to a different commit.",
+    "Historical frozen strict and raw comparison results remain separate from product-positive and integrated checks.",
+    "Only synthetic fixtures and disposable stock servers were used. Real site-data cases and Daybreak review remain unrun."
+  ],
+  "prs": [
+    {
+      "number": 1,
+      "feature": "Nightscout API compatibility and ordered glucose history",
+      "fork_ref": "refs/heads/contrib/nightscout-v3",
+      "base_sha": "a8acabe41d6380f6647f9863c37bc9d776ffc9cc",
+      "first_parent_sha": "a35b0f26065cb3bf87a6c72e612707078a31f582",
+      "head_sha": "4da903510209ecd84a37dc12d5c1149dd82b576b",
+      "status": "qualified",
+      "upstream_repo": "aperetti/ha-nightscout-extended",
+      "upstream_branch": "main",
+      "publish_after": [],
+      "evidence": "Ordered SGV carried forward 141 checks and reran 20 checks. Public legacy and protected v3 passed on stock Nightscout 15.0.6."
+    },
+    {
+      "number": 2,
+      "feature": "Insulin age",
+      "fork_ref": "refs/heads/contrib/insulin-age",
+      "base_sha": "4da903510209ecd84a37dc12d5c1149dd82b576b",
+      "first_parent_sha": "4da903510209ecd84a37dc12d5c1149dd82b576b",
+      "head_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "status": "qualified",
+      "upstream_repo": "aperetti/ha-nightscout-extended",
+      "upstream_branch": "main",
+      "publish_after": [
+        1
+      ],
+      "evidence": "7/7 focused API and Home Assistant checks on this head, including the legacy retained-history correction."
+    },
+    {
+      "number": 3,
+      "feature": "Cannula age",
+      "fork_ref": "refs/heads/contrib/cannula-age",
+      "base_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "first_parent_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "head_sha": "019d9b65fd3979b3abc3f539c422c8035545ce06",
+      "status": "qualified",
+      "upstream_repo": "aperetti/ha-nightscout-extended",
+      "upstream_branch": "main",
+      "publish_after": [
+        2
+      ],
+      "evidence": "2/2 focused Home Assistant checks on this head, one per API mode."
+    },
+    {
+      "number": 4,
+      "feature": "CGM sensor age",
+      "fork_ref": "refs/heads/contrib/cgm-age",
+      "base_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "first_parent_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "head_sha": "db323d6da8bbe4fd14cfc3ddb0cd38bf9ad0c13c",
+      "status": "qualified",
+      "upstream_repo": "aperetti/ha-nightscout-extended",
+      "upstream_branch": "main",
+      "publish_after": [
+        2
+      ],
+      "evidence": "8/8 focused API and Home Assistant checks on this head."
+    },
+    {
+      "number": 5,
+      "feature": "Pump battery age",
+      "fork_ref": "refs/heads/contrib/pump-battery-age",
+      "base_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "first_parent_sha": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+      "head_sha": "7c44fc8184b4c8b5828dff299b28780926a61b24",
+      "status": "qualified",
+      "upstream_repo": "aperetti/ha-nightscout-extended",
+      "upstream_branch": "main",
+      "publish_after": [
+        2
+      ],
+      "evidence": "4/4 focused Home Assistant checks on this head."
+    },
+    {
+      "number": 6,
+      "feature": "AAPS/Dana-i insulin remaining",
+      "fork_ref": "refs/heads/contrib/insulin-remaining",
+      "base_sha": "4da903510209ecd84a37dc12d5c1149dd82b576b",
+      "first_parent_sha": "9e668d5ba79a648c5e431e2017e485b146fe75ac",
+      "head_sha": "86b92203118e496ac1afc3ee2452650faf39b638",
+      "status": "qualified",
+      "upstream_repo": "aperetti/ha-nightscout-extended",
+      "upstream_branch": "main",
+      "publish_after": [
+        1
+      ],
+      "evidence": "18/18 direct and 3/3 Home Assistant checks freshly passed on the corrected head. Both stock server smokes passed on the composition. The separate two-entry check passed."
+    }
+  ]
+}
