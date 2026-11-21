@@ -60,7 +60,7 @@ def trace_signals(protected):
                 observed.add("age-filter")
             if path == "/api/v3/devicestatus":
                 for field in ("date", "created_at"):
-                    if f"{field}$gte" in query and f"{field}$lte" in query:
+                    if f"{field}$gte" in query and f"{field}$lte" not in query:
                         observed.add(f"device-status-{field}")
         else:
             if path == "/api/v1/treatments.json" and "find[eventType][$in][0]" in query:
@@ -91,6 +91,14 @@ async def check_reservoir(client, seed, anchor):
                 == (row["units"], contact, row["uploader"]), f"native reservoir {selector}")
     require(await client.async_get_reservoir(anchor - timedelta(hours=2), None) is None,
             "successful empty device-status interval")
+
+    # A different evaluation clock keeps the two-current and empty-window cases intact.
+    isolated_clock = anchor - timedelta(minutes=seed["isolated_reservoir_clock_minutes_ago"])
+    row = next(item for item in seed["device_status"] if item["case"] == "isolated-zero")
+    contact = anchor - timedelta(minutes=row["contact_minutes_ago"])
+    reading = await client.async_get_reservoir(isolated_clock, None)
+    require(reading is not None and (reading.units, reading.source_time, reading.uploader)
+            == (row["units"], contact, row["uploader"]), "stale uploader does not block auto-selection")
 
 
 async def prove_signals(url, access, anchor_iso, *, protected):
