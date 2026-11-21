@@ -114,9 +114,14 @@ class NightscoutData:
                 return t
         return None
 
+    @property
+    def forecast_source_time(self) -> datetime | None:
+        """The v2 bgnow timestamp used to select an AR2 horizon."""
+        return self.glucose_time if self._forecast_anchor is False else self._forecast_anchor
+
     def forecast_at(self, minutes: int) -> ForecastPoint | None:
-        """The forecast point closest to `minutes` after the latest reading (within 3 min)."""
-        anchor = self.glucose_time if self._forecast_anchor is False else self._forecast_anchor
+        """The forecast point closest to `minutes` after its source reading (within 3 min)."""
+        anchor = self.forecast_source_time
         if not self.forecast or anchor is None:
             return None
         target = anchor.timestamp() + minutes * 60
@@ -144,6 +149,14 @@ def _num(value: Any) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _object(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def parse_properties(props: dict[str, Any]) -> NightscoutData:
     """Turn a /api/v2/properties response into NightscoutData.
 
@@ -151,29 +164,33 @@ def parse_properties(props: dict[str, Any]) -> NightscoutData:
     """
     data = NightscoutData()
 
-    bgnow = props.get("bgnow") or {}
+    bgnow = _object(props.get("bgnow"))
     data.glucose = _num(bgnow.get("last"))
     data.glucose_time = _ms_to_dt(bgnow.get("mills"))
 
-    delta = props.get("delta") or {}
+    delta = _object(props.get("delta"))
     data.delta = _num(delta.get("mgdl"))
 
-    direction = props.get("direction") or {}
-    data.direction = direction.get("value") or None
+    direction = _object(props.get("direction"))
+    data.direction = _text(direction.get("value")) or None
 
-    iob = props.get("iob") or {}
+    iob = _object(props.get("iob"))
     data.iob = _num(iob.get("iob"))
-    data.iob_source = iob.get("source")
+    data.iob_source = _text(iob.get("source"))
 
-    cob = props.get("cob") or {}
+    cob = _object(props.get("cob"))
     data.cob = _num(cob.get("cob"))
-    data.cob_source = cob.get("source")
+    data.cob_source = _text(cob.get("source"))
 
-    basal = (props.get("basal") or {}).get("current") or {}
+    basal = _object(_object(props.get("basal")).get("current"))
     data.basal = _num(basal.get("totalbasal"))
 
-    predicted = ((props.get("ar2") or {}).get("forecast") or {}).get("predicted") or []
+    predicted = _object(_object(props.get("ar2")).get("forecast")).get("predicted")
+    if not isinstance(predicted, list):
+        return data
     for point in predicted:
+        if not isinstance(point, dict):
+            continue
         when, mgdl = _ms_to_dt(point.get("mills")), _num(point.get("mgdl"))
         if when is not None and mgdl is not None:
             data.forecast.append(ForecastPoint(when, mgdl))
