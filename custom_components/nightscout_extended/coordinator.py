@@ -9,7 +9,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
+from .age import AGE_EVENT_TYPES
 from .api import NightscoutAuthError, NightscoutClient, NightscoutConnectionError, NightscoutData
 from .const import CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DEFAULT_THRESHOLDS_MGDL, DOMAIN
 
@@ -19,7 +21,7 @@ type NightscoutConfigEntry = ConfigEntry[NightscoutCoordinator]
 
 
 class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
-    """Fetches all values in one request."""
+    """Polls Nightscout properties and treatment signals."""
 
     config_entry: NightscoutConfigEntry
 
@@ -63,8 +65,13 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
 
     async def _async_update_data(self) -> NightscoutData:
         try:
-            return await self.client.async_get_data()
+            data = await self.client.async_get_data(tolerate_treatment_failure=True)
         except NightscoutAuthError as err:
             raise ConfigEntryAuthFailed("Nightscout rejected the token or API secret") from err
         except NightscoutConnectionError as err:
             raise UpdateFailed(f"Could not read Nightscout: {err}") from err
+        try:
+            data.age_markers = await self.client.async_get_age_markers(AGE_EVENT_TYPES, dt_util.utcnow())
+        except (NightscoutAuthError, NightscoutConnectionError):
+            data.age_markers = None
+        return data

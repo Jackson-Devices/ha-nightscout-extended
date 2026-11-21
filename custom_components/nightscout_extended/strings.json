@@ -86,6 +86,9 @@
       },
       "last_insulin": {
         "name": "Last insulin"
+      },
+      "insulin_age": {
+        "name": "Insulin age"
       }
     },
     "calendar": {

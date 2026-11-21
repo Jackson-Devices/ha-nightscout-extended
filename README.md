@@ -25,6 +25,10 @@ integration only provides glucose. This one can run alongside it.
 | Last carbs | g | Most recent treatment with carbs; attributes `time`, `event_type`, `notes` |
 | Last insulin | U | Most recent treatment with insulin; same attributes |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
+| Insulin age | h | Hours since the latest nonfuture `Insulin Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the change. |
+
+Insulin age uses the Nightscout treatments read permission. It is unknown when the retained history contains no eligible
+change, and unavailable when the lookup fails. Boluses leave the selected change timestamp intact.
 
 ## Treatments calendar
 
