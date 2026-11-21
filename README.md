@@ -28,7 +28,9 @@ integration only provides glucose. This one can run alongside it.
 | Insulin age | h | Hours since the latest nonfuture `Insulin Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the change. |
 
 Insulin age uses the Nightscout treatments read permission. It is unknown when the retained history contains no eligible
-change, and unavailable when the lookup fails. Boluses leave the selected change timestamp intact.
+change, and unavailable when the lookup fails. Boluses leave the selected change timestamp intact. With the legacy API,
+the retained range uses the UTC `created_at` field that Nightscout writes for treatments. Older imports without a
+stored `created_at` field require v3 for age lookup.
 
 ## Treatments calendar
 

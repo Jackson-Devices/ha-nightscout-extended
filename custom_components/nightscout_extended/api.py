@@ -585,10 +585,16 @@ class NightscoutClient:
             return await self._v3_treatments(start, end, limit)
         return parse_treatments(await self._legacy_treatment_range(_iso(start), _iso(end), limit))
 
-    async def _legacy_age_rows(self, event_types: tuple[str, ...]) -> list[dict[str, Any]]:
+    async def _legacy_age_rows(
+        self, event_types: tuple[str, ...], now: datetime,
+    ) -> list[dict[str, Any]]:
         query = {
             f"find[eventType][$in][{index}]": kind for index, kind in enumerate(event_types)
         }
+        # Older v1 servers supply a four-day floor unless created_at is explicit.
+        # Nightscout's native v1 writes store it as a UTC ISO string.
+        query["find[created_at][$gte]"] = "0001-01-01T00:00:00.000Z"
+        query["find[created_at][$lte]"] = _v3_iso(now)
         # V1 treatment search has a count but no offset. Only a short response
         # completes the filtered history. Each larger read replaces its prefix.
         for count in _AGE_LEGACY_COUNTS:
@@ -615,10 +621,10 @@ class NightscoutClient:
             async for page in self._v3_pages(_V3_TREATMENTS, query, _V3_PAGE_SIZE):
                 rows.extend(page)
         else:
-            rows = await self._legacy_age_rows(event_types)
+            rows = await self._legacy_age_rows(event_types, now)
 
-        # Keep mixed-origin clocks eligible. Filtering storage by a single time
-        # field would exclude older records that only carry a fallback clock.
+        # V3 searches without a storage clock predicate to include mixed-origin
+        # rows. Both modes use the event occurrence clock, not server write time.
         markers: dict[str, AgeMarker] = {}
         for _, row in _current_treatment_rows(rows):
             kind = row.get("eventType")

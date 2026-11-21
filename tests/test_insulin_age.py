@@ -50,7 +50,8 @@ def test_age_warm_reconciles_old_marker_revisions_tombstones_and_prune(monkeypat
             assert query == {"eventType$in": INSULIN, "limit": "100", "skip": "0"}
             return {"status": 200, "result": rows.copy()}
         assert path == "/api/v1/treatments.json"
-        assert query == {"find[eventType][$in][0]": INSULIN, "count": "100"}
+        assert query["find[eventType][$in][0]"] == INSULIN
+        assert query["count"] == "100"
         return rows.copy()
 
     monkeypatch.setattr(client, "_protected_v3" if v3 else "_get", read)
@@ -75,6 +76,33 @@ def test_age_warm_reconciles_old_marker_revisions_tombstones_and_prune(monkeypat
     assert lookup()[INSULIN].time.tzinfo == timezone.utc
     rows[0] = {"_id": "numeric", "eventType": INSULIN, "mills": int(RECENT.timestamp() * 1000)}
     assert lookup()[INSULIN].time == RECENT
+
+
+def test_legacy_age_query_overrides_native_four_day_cutoff(monkeypatch):
+    client = api.NightscoutClient(None, "https://fixture.invalid", None)
+    oldest = NOW - timedelta(days=7)
+    rows = [marker("retained", oldest), marker("future", NOW + timedelta(milliseconds=1))]
+    queries = []
+
+    async def read(path, query):
+        assert path == "/api/v1/treatments.json"
+        queries.append(query)
+        lower = query.get("find[created_at][$gte]", (NOW - timedelta(days=4)).isoformat())
+        upper = query.get("find[created_at][$lte]", datetime.max.replace(tzinfo=timezone.utc).isoformat())
+        return [
+            row for row in rows
+            if datetime.fromisoformat(lower) <= datetime.fromisoformat(row["created_at"])
+            <= datetime.fromisoformat(upper)
+        ][:int(query["count"])]
+
+    monkeypatch.setattr(client, "_get", read)
+    assert asyncio.run(client.async_get_age_markers((INSULIN,), NOW))[INSULIN].time == oldest
+    assert queries == [{
+        "find[eventType][$in][0]": INSULIN,
+        "find[created_at][$gte]": "0001-01-01T00:00:00.000Z",
+        "find[created_at][$lte]": "2026-01-08T12:00:00.000Z",
+        "count": "100",
+    }]
 
 
 def test_v3_age_merges_bounded_pages_before_deciding_latest(monkeypatch):
