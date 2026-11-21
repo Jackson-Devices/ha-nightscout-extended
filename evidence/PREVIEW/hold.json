@@ -1,0 +1,27 @@
+{
+  "format": "nightscout-terminal-handoff/1",
+  "state": "DAYBREAK-HOLD",
+  "product": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+  "qa": "0628a3989d0a89eaefa806d3db22643758cce6d3",
+  "preflight": "f8df5c6644e27c72b822010217e2e2b696b8aa23",
+  "gate_result": "REFUSED",
+  "receipt": "evidence/PREVIEW/batch.json",
+  "freeze": "f1a4e7dddf071f2c6d3eb2b27499ee4536d76ab3",
+  "pr_heads": {
+    "refs/heads/contrib/nightscout-v3": "4da903510209ecd84a37dc12d5c1149dd82b576b",
+    "refs/heads/contrib/insulin-age": "cacb087398d8d73bd3931a6b9f1904b1c3248380",
+    "refs/heads/contrib/cannula-age": "019d9b65fd3979b3abc3f539c422c8035545ce06",
+    "refs/heads/contrib/cgm-age": "db323d6da8bbe4fd14cfc3ddb0cd38bf9ad0c13c",
+    "refs/heads/contrib/pump-battery-age": "7c44fc8184b4c8b5828dff299b28780926a61b24",
+    "refs/heads/contrib/insulin-remaining": "86b92203118e496ac1afc3ee2452650faf39b638"
+  },
+  "publication": "held",
+  "upstream_prs_opened": 0,
+  "release_tag_created": false,
+  "daybreak_invoked": false,
+  "live_site_tested": false,
+  "successors": [],
+  "capabilities": [],
+  "automatic_recovery": false,
+  "resume": "A separate operator-initiated review on the exact product candidate. Maintainer owns upstream publication."
+}

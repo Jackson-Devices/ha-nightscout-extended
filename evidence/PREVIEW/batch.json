@@ -1,0 +1,97 @@
+{
+  "format": "nightscout-release-verification/1",
+  "result": "REFUSED",
+  "run": "nsx-rcv",
+  "product": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+  "qa": "0628a3989d0a89eaefa806d3db22643758cce6d3",
+  "preflight": "f8df5c6644e27c72b822010217e2e2b696b8aa23",
+  "suite": "f1a4e7dddf071f2c6d3eb2b27499ee4536d76ab3",
+  "source": "Independent Codex Cloud final receiver; coordinator transcription of reported results",
+  "checks": {
+    "bootstrap_exit": 0,
+    "api": {
+      "passed": 115,
+      "exit": 0
+    },
+    "home_assistant": {
+      "passed": 54,
+      "exit": 0
+    },
+    "positive_ha": {
+      "passed": 4,
+      "exit": 0
+    },
+    "supplemental": {
+      "passed": 15,
+      "failed": 12,
+      "exit": 1,
+      "historical_raw": {
+        "passed": 1,
+        "failed": 12,
+        "harness_errors": 0
+      }
+    },
+    "card": {
+      "exit": 0,
+      "collector_count": null,
+      "diagnostic_passed": 16
+    },
+    "h1_control_exits": {
+      "good": 0,
+      "wrong_route": 1,
+      "wrong_state": 1,
+      "broken_environment": 2
+    },
+    "stock_nightscout": {
+      "version": "15.0.6",
+      "public_legacy_exit": 0,
+      "protected_v3_exit": 0
+    },
+    "collector": {
+      "passed": 6,
+      "total": 11,
+      "exit": 1
+    },
+    "preview": {
+      "exit": 1,
+      "refused_gate": "supplemental",
+      "release_archive_created": false
+    }
+  },
+  "rejections": [
+    {
+      "control": "wrong-version",
+      "exit": 1,
+      "reason": "manifest version mismatch",
+      "archive": false
+    },
+    {
+      "control": "missing-result",
+      "exit": 1,
+      "reason": "missing HA gate",
+      "archive": false
+    },
+    {
+      "control": "failed-check",
+      "exit": 1,
+      "reason": "failed HA gate",
+      "archive": false
+    }
+  ],
+  "separate_layout_probe": {
+    "files": 21,
+    "matched_product_and_qa": true,
+    "diagnostic_archive_sha256": "92ac666ff2a3ad290c1964a62ef446a18015e492dd8c76c771053f8bd00059df",
+    "release_artifact": false
+  },
+  "collector_findings": [
+    "Separate integrated supplemental cases from historical raw comparisons; keep the raw failures visible.",
+    "Use stable Node TAP output or support the Node 24 default summary.",
+    "Check expected negative-control markers on stderr without exposing raw credential-bearing output."
+  ],
+  "preview_tag": "v0.3.2",
+  "existing_upstream_tag_commit": "4bf8594a6baa82189aac53b3e76cded687b87e6d",
+  "all_six_refs_verified": true,
+  "five_frozen_files_matched": true,
+  "disposable_server_resources_remaining": 0
+}
