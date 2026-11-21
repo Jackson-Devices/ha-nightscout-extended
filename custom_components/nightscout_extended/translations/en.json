@@ -89,6 +89,9 @@
       },
       "insulin_age": {
         "name": "Insulin age"
+      },
+      "sensor_age": {
+        "name": "CGM sensor age"
       }
     },
     "calendar": {

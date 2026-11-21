@@ -26,9 +26,13 @@ integration only provides glucose. This one can run alongside it.
 | Last insulin | U | Most recent treatment with insulin; same attributes |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
 | Insulin age | h | Hours since the latest nonfuture `Insulin Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the change. |
+| CGM sensor age | h | Hours since the latest nonfuture `Sensor Start` or `Sensor Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the event. |
 
 Insulin age uses the Nightscout treatments read permission. It is unknown when the retained history contains no eligible
 change, and unavailable when the lookup fails. Boluses leave the selected change timestamp intact.
+
+CGM sensor age uses the same treatment history. `Sensor Change` wins if both events have the same timestamp.
+New glucose readings leave the sensor event timestamp intact.
 
 ## Treatments calendar
 
