@@ -105,8 +105,15 @@ def inputs():
     return base, overlay, environments, sha256(overlay_bytes)
 
 
-def safe_environment(state):
+def safe_environment(state, *, network=False):
     names = ("PATH", "HOME", "TEMP", "TMP", "TMPDIR", "SYSTEMROOT", "LANG", "LC_ALL")
+    if network:
+        # Keep the host's approved egress and trust settings for uv downloads.
+        names += (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+            "SSL_CERT_FILE", "SSL_CERT_DIR",
+        )
     env = {name: os.environ[name] for name in names if name in os.environ}
     env.update(
         UV_CACHE_DIR=str(state / "uv-cache"),
@@ -174,13 +181,14 @@ def stage(state, base, environments):
     uv = stage_binary(state, "uv", base["uv"])
     stage_binary(state, "node", base["node"])
     env = safe_environment(state)
+    network_env = safe_environment(state, network=True)
     (state / "build-constraints.txt").write_text("\n".join(base["build_requirements"]) + "\n", encoding="utf-8")
 
-    def call(phase, *args):
-        return command(state, env, phase, uv, "--no-config", *args)
+    def call(phase, *args, network=False):
+        return command(state, network_env if network else env, phase, uv, "--no-config", *args)
 
     python_version = base["environments"]["ha"]["python"]
-    call("managed Python installation", "python", "install", python_version)
+    call("managed Python installation", "python", "install", python_version, network=True)
     for name, requirements in environments.items():
         expected_packages(requirements)
         path = state / name
@@ -192,7 +200,7 @@ def stage(state, base, environments):
         version = command(state, env, f"{name} Python version", interpreter, "--version")
         require(version.strip() == f"Python {python_version}".encode(), f"{name} Python version differs")
         call(f"{name} dependency sync", "pip", "sync", "--python", interpreter, "--require-hashes", "--strict",
-             "--default-index", base["index"], requirement_path)
+             "--default-index", base["index"], requirement_path, network=True)
         call(f"{name} dependency check", "pip", "check", "--python", interpreter)
 
 
