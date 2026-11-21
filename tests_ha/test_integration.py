@@ -23,6 +23,7 @@ def _mock(aioclient_mock: AiohttpClientMocker, status=STATUS, ok=True):
     code = 200 if ok else 401
     aioclient_mock.get(f"{URL}/api/v1/status.json", json=status if ok else {}, status=code)
     aioclient_mock.get(f"{URL}/api/v2/properties/bgnow", json=PROPS if ok else {}, status=code)
+    aioclient_mock.get(f"{URL}/api/v3/version", status=404)
     aioclient_mock.get(
         f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS if ok else {}, status=code
     )
