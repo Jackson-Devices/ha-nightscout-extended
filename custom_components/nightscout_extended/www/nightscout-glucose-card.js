@@ -58,6 +58,8 @@ const DEFAULT_CONFIG = {
 const CHART_LO = 40;   // mg/dL at the bottom of the chart
 const CHART_HI = 300;  // mg/dL at the top
 const FORECAST_AHEAD_MIN = 30;
+const HISTORY_ACTION = "get_glucose_history";
+const HISTORY_LABELS = { partial: "History partial", unavailable: "History unavailable", cached: "History cached" };
 
 /** Exposed for tests; pure functions with no DOM or hass access. */
 export const logic = {
@@ -122,6 +124,38 @@ function isMmol(state) {
   return /mmol/i.test((state && state.attributes && state.attributes.unit_of_measurement) || "");
 }
 
+function historyState(entity = null, connection = null) {
+  return {
+    entity, connection, mode: null, key: null, t: 0, busy: false, offline: false,
+    pts: [], missing: [], status: null, asOf: null,
+  };
+}
+
+function sourceHistory(data, start, end) {
+  if (data?.unit !== "mg/dL" || !["complete", "partial", "unavailable"].includes(data.status) ||
+      !Array.isArray(data.readings) || !Array.isArray(data.missing_ranges)) {
+    throw new Error("Invalid Nightscout history response");
+  }
+  const byID = new Map();
+  for (const row of data.readings) {
+    if (typeof row?.id !== "string" || !row.id || !Number.isSafeInteger(row.date) ||
+        row.date < start || row.date >= end || !Number.isFinite(row.sgv)) {
+      throw new Error("Invalid Nightscout history reading");
+    }
+    byID.set(row.id, row);
+  }
+  const readings = [...byID.values()].sort((a, b) => a.date - b.date || (a.id < b.id ? -1 : 1));
+  const missing = data.missing_ranges.map((range) => {
+    if (!Number.isSafeInteger(range?.start) || !Number.isSafeInteger(range?.end) ||
+        range.start < start || range.end > end || range.start >= range.end || data.status === "complete") {
+      throw new Error("Invalid Nightscout history coverage");
+    }
+    return [range.start, range.end];
+  });
+  const asOf = typeof data.as_of === "string" && Number.isFinite(Date.parse(data.as_of)) ? data.as_of : null;
+  return { pts: readings.map(({ date, sgv }) => [date, sgv]), missing, status: data.status, asOf };
+}
+
 class NightscoutGlucoseCard extends HTMLElement {
   static getStubConfig() {
     return {};
@@ -176,8 +210,13 @@ class NightscoutGlucoseCard extends HTMLElement {
     }
     cfg.hours_to_show = Math.min(48, Math.max(1, cfg.hours_to_show));
     cfg.text_size = Math.min(400, Math.max(25, cfg.text_size));
+    const old = this._config;
     this._config = cfg;
-    this._history = { t: 0, key: null, pts: [], busy: false };
+    if (!old || old.entity !== cfg.entity || old.hours_to_show !== cfg.hours_to_show) this._history = historyState();
+    if (this._hass) {
+      this._ids = this._findEntities();
+      this._fetchHistory();
+    }
     if (this._root) this._render();
   }
 
@@ -255,36 +294,96 @@ class NightscoutGlucoseCard extends HTMLElement {
   // ---- history ----------------------------------------------------------
 
   _fetchHistory() {
-    const h = this._history;
+    const hass = this._hass;
     const id = this._ids && this._ids.glucose;
-    if (!this._config.show_chart || !id || !this._hass || !this._hass.callWS || h.busy) return;
-    const last = this._state("last");
-    const key = `${id}|${last ? last.state : ""}|${this._config.hours_to_show}`;
-    if (key === h.key && Date.now() - h.t < 60000) return;
+    const glucose = this._state("glucose");
+    if (!this._config?.show_chart || !id || !glucose || !hass?.callWS) return;
+    const connection = hass.connection ?? null;
+    let h = this._history;
+    if (h.entity !== id || h.connection !== connection) {
+      h = this._history = historyState(id, connection);
+    }
+    if (hass.connected === false) {
+      if (!h.offline) {
+        this._history = { ...h, offline: true, busy: false, key: null };
+        if (h.mode !== "legacy") this._history.status = h.pts.length ? "cached" : "unavailable";
+      }
+      return;
+    }
+    if (h.offline) {
+      h.offline = false;
+      if (h.mode === "legacy") h = this._history = historyState(id, connection);
+    }
+
+    const revision = glucose.attributes?.sgv_history_revision;
+    const key = JSON.stringify([revision, revision == null ? this._state("last")?.state : null,
+      glucose.state === "unavailable"]);
+    const end = Date.now();
+    const needsThrottle = revision == null || h.mode === "legacy";
+    if (h.busy || (key === h.key && (!needsThrottle || end - h.t < 60000))) return;
+    const start = Math.trunc(end - this._config.hours_to_show * 3600000);
     h.busy = true;
-    const mmol = isMmol(this._state("glucose"));
-    this._hass
-      .callWS({
-        type: "history/history_during_period",
-        start_time: new Date(Date.now() - this._config.hours_to_show * 3600000).toISOString(),
-        entity_ids: [id],
-        minimal_response: true,
-        no_attributes: true,
-        significant_changes_only: false,
+    h.key = key;
+    this._readHistory(h, hass, start, end, isMmol(glucose))
+      .catch((err) => {
+        if (h.mode === "legacy") return;
+        if (err?.code === "unauthorized" || (err?.code === "home_assistant_error" &&
+            ["Unauthorized", "UnknownUser"].includes(err.message))) {
+          h.mode = "source";
+          h.pts = [];
+          h.missing = [];
+          h.asOf = null;
+        }
+        h.status = h.pts.length ? "cached" : "unavailable";
       })
-      .then((r) => {
-        // Retain nonnumeric observations as gaps instead of joining around them.
-        h.pts = ((r && r[id]) || [])
-          .map((p) => [(p.lu || p.last_updated_ts || 0) * 1000, numericValue(p.s) * (mmol ? MGDL_PER_MMOL : 1)])
-          .filter(([time]) => Number.isFinite(time) && time > 0);
-        h.key = key;
-      })
-      .catch(() => {})
       .finally(() => {
         h.t = Date.now();
         h.busy = false;
+        if (h !== this._history) return;
         this._render();
+        // An entity update may have arrived while this request was in flight.
+        this._fetchHistory();
       });
+  }
+
+  async _readHistory(h, hass, start, end, mmol) {
+    const startTime = new Date(start).toISOString();
+    if (h.mode !== "legacy") {
+      try {
+        const result = await hass.callWS({
+          type: "call_service",
+          domain: PLATFORM,
+          service: HISTORY_ACTION,
+          service_data: { entity_id: h.entity, start: startTime, end: new Date(end).toISOString() },
+          return_response: true,
+        });
+        if (h !== this._history) return;
+        h.mode = "source";
+        Object.assign(h, sourceHistory(result?.response, start, end));
+        return;
+      } catch (err) {
+        if (h !== this._history) return;
+        // Only HA's explicit response for the missing action enables legacy history.
+        if (err?.code !== "not_found" || h.mode === "source") throw err;
+        h.mode = "legacy";
+        h.status = h.asOf = null;
+      }
+    }
+
+    const recorded = await hass.callWS({
+      type: "history/history_during_period",
+      start_time: startTime,
+      entity_ids: [h.entity],
+      minimal_response: true,
+      no_attributes: true,
+      significant_changes_only: false,
+    });
+    if (h !== this._history) return;
+    // Retain nonnumeric Recorder observations as breaks in the legacy chart.
+    h.pts = (recorded?.[h.entity] || [])
+      .map((point) => [(point.lu || point.last_updated_ts || 0) * 1000,
+        numericValue(point.s) * (mmol ? MGDL_PER_MMOL : 1)])
+      .filter(([time]) => Number.isFinite(time) && time > 0);
   }
 
   // ---- DOM --------------------------------------------------------------
@@ -405,7 +504,13 @@ class NightscoutGlucoseCard extends HTMLElement {
       if (showForecast && Number.isFinite(fc) && targetTime > Math.max(now, lastMs)) {
         parts.push(`30 min ≈ ${mmol ? fc.toFixed(1) : Math.round(fc)}`);
       }
-      el.footer.replaceChildren(...parts.map((p) => Object.assign(document.createElement("span"), { textContent: p })));
+      const children = parts.map((p) => Object.assign(document.createElement("span"), { textContent: p }));
+      const status = cfg.show_chart && HISTORY_LABELS[this._history.status];
+      if (status) children.push(Object.assign(document.createElement("span"), {
+        textContent: status,
+        title: this._history.asOf ? `As of ${this._history.asOf}` : "",
+      }));
+      el.footer.replaceChildren(...children);
     }
 
     el.wrap.setAttribute(
@@ -442,7 +547,7 @@ class NightscoutGlucoseCard extends HTMLElement {
     const X = (ms) => (((ms - t0) / (t1 - t0)) * 1000).toFixed(1);
     const Y = (v) => ((1 - (Math.min(CHART_HI, Math.max(CHART_LO, v)) - CHART_LO) / (CHART_HI - CHART_LO)) * 400).toFixed(1);
     const pts = this._history.pts.filter((p) => p[0] >= t0);
-    if (current && Number.isFinite(current[0]) && Number.isFinite(current[1])
+    if (this._history.mode === "legacy" && current && Number.isFinite(current[0]) && Number.isFinite(current[1])
         && (!pts.length || current[0] > pts[pts.length - 1][0])) pts.push(current);
 
     const gapMs = this._config.stale_minutes * 60000;
@@ -453,7 +558,9 @@ class NightscoutGlucoseCard extends HTMLElement {
         segment = undefined;
         continue;
       }
-      if (!segment || point[0] - segment[segment.length - 1][0] > gapMs) {
+      const previous = segment?.[segment.length - 1];
+      const missing = previous && this._history.missing.some(([start, end]) => previous[0] < end && point[0] > start);
+      if (!previous || point[0] - previous[0] > gapMs || missing) {
         segment = [];
         segments.push(segment);
       }
