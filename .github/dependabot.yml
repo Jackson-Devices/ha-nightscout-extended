@@ -1,0 +1,35 @@
+# Track workflow actions and the dependencies installed by the Python test jobs.
+# The weekly schedule and PR limits apply to version updates. Security updates use
+# their own advisory triggers and GitHub's separate fixed limit of 10 open PRs.
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#open-pull-requests-limit
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: pip
+    directories:
+      - /tests
+      - /tests_ha
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      python-test-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
