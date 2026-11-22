@@ -143,9 +143,9 @@ test("glucose source timestamp controls rendered age before lagging last-reading
   assert.equal(el.wrap.style["--ngc-bg"], "#3d9a5b");
 });
 
-test("cached primary glucose and invalid source time fall back through live HA entities", () => {
+test("cached primary mmol glucose and invalid source time use entity fallbacks", () => {
   const el = renderCard({
-    glucose: sensor("180", "mg/dL", {
+    glucose: sensor(String(180 / 18.016), "mmol/L", {
       thresholds_mgdl: T,
       source_time: "not-a-timestamp",
     }),
