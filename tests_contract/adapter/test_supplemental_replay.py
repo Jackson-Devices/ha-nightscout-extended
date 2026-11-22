@@ -745,6 +745,23 @@ def _render(event):
     print(_redact(json.dumps(event, sort_keys=True)), flush=True)
 
 
+def _public_delta_v1_reading(step):
+    """Select the latest eligible raw SGV from this phase's pinned V1 inventory."""
+    case_id = "G-PUBLIC-DELTA"
+    wire = CASES[case_id]["steps"][step - 1]["wire"]
+    payload, = (payload for route, _, payload in wire if route == "entries1")
+    request = PREPARED[case_id][step - 1][1]
+    clock = _timestamp(request["clock"])
+    rows = (DATA["records"][record_id] for record_id in DATA["lists"][payload])
+    return max(
+        (
+            row for row in rows
+            if row["type"] == "sgv" and row.get("isValid") is not False and _timestamp(row["at"]) <= clock
+        ),
+        key=lambda row: _timestamp(row["at"]),
+    )
+
+
 def _forecast_expectation(step):
     """Project the independently selected source rows for the four pinned AR2 phases."""
     targets = (
@@ -868,6 +885,18 @@ def _product_policy(case_id, index, actual, expected, wire, entry_state, *, fore
             attributes = actual["glucose"][4]
             if case_id == "G-PUBLIC-DELTA":
                 require(not v3_entries(), "public legacy reads its raw V2 computed delta")
+                reading = _public_delta_v1_reading(index)
+                stamp = epoch(reading["at"])
+                require(
+                    any(
+                        call["status"] == 200 and call["lower"] <= stamp < call["upper"]
+                        and call["returned"] > 0
+                        for call in calls("v1/entries")
+                    ),
+                    "a successful V1 entry read includes the selected raw SGV",
+                )
+                compare(reading["at"], actual["glucose"][2], "legacy raw SGV time")
+                compare(reading["direction"], attributes.get("trend"), "legacy raw SGV direction")
                 compare((17, 17, -17, None, 10, None, 0)[index - 1],
                         attributes.get("delta"), "legacy delta in mg/dL")
             else:
@@ -1021,7 +1050,8 @@ def _compatible_expectation(case_id, step, frozen_expected):
             reading[0] = {"$near": converted, "absolute": 0.000001}
         if case_id == "G-PUBLIC-DELTA":
             deltas = (17, 17, -17, None, 10, None, 0)
-            reading[4] = {"delta": deltas[step - 1], "trend": None}
+            raw = _public_delta_v1_reading(step)
+            reading[4] = {"delta": deltas[step - 1], "trend": raw["direction"]}
         else:
             reading[4] = {"delta": None, "trend": "SingleDown" if step == 3 else "SingleUp"}
         replace("glucose", reading, "public HA units and released V2 or V3-agreement delta policy")
@@ -1120,6 +1150,7 @@ async def _run_supplemental(case_id, freezer, hass_storage, tmp_path, *, integra
             differences.extend(f"step {index}: {mismatch}" for mismatch in mismatches.values())
             policy, compatibility, declared = [], {}, {}
             forecast_timestamps = None
+            public_direction = None
             if integrated:
                 policy_actual = actual
                 if case_id == "F-AR2-MIXED":
@@ -1127,6 +1158,20 @@ async def _run_supplemental(case_id, freezer, hass_storage, tmp_path, *, integra
                     policy_actual = {
                         role: value[:4] + [forecast_timestamps[role]] if value is not None else None
                         for role, value in actual.items()
+                    }
+                elif case_id == "G-PUBLIC-DELTA":
+                    reading = _public_delta_v1_reading(index)
+                    raw_direction = reading["direction"]
+                    frozen_direction = expected["glucose"][4]["trend"]
+                    glucose = actual["glucose"]
+                    public_direction = {
+                        "source_route": "v1/entries", "source_time": reading["at"],
+                        "raw_direction": raw_direction,
+                        "frozen_direction": frozen_direction,
+                        "observed_direction": glucose[4].get("trend") if glucose is not None else None,
+                        "frozen_disposition": (
+                            "equal" if raw_direction == frozen_direction else "direction_difference"
+                        ),
                     }
                 policy = _product_policy(
                     case_id, index, actual, expected, replay.calls, observer.entry_state,
@@ -1145,6 +1190,7 @@ async def _run_supplemental(case_id, freezer, hass_storage, tmp_path, *, integra
                 "sgv_fixture_writes": replay.sgv_writes,
                 "differences": mismatches, "raw_mismatch_count": len(mismatches), "wire": replay.calls,
                 **({"forecast_timestamps": forecast_timestamps} if forecast_timestamps is not None else {}),
+                **({"public_direction": public_direction} if public_direction is not None else {}),
                 "product_policy_failures": policy,
                 "declared_release_deltas": declared,
                 "compatibility_failures": compatibility,
@@ -1187,6 +1233,29 @@ async def test_supplemental_integrated_compatibility(
 ):
     """Check all public results against H1 plus exact, declared release deltas."""
     await _run_supplemental(case_id, freezer, hass_storage, tmp_path, integrated=True)
+
+
+@pytest.mark.parametrize("observed_direction", [{"trend": "Flat"}, {}], ids=["wrong", "missing"])
+def test_public_delta_rejects_wrong_or_missing_raw_direction(observed_direction):
+    case_id = "G-PUBLIC-DELTA"
+    step, _, expected, _, _, _, _ = PREPARED[case_id][0]
+    reading = [180, "mg/dL", "2026-01-08T12:00:00Z", "available"]
+    wire = [{
+        "route": "v1/entries", "status": 200, "returned": 2,
+        "lower": epoch("2026-01-08T11:00:00Z"), "upper": epoch("2026-01-08T12:01:00Z"),
+    }]
+    correct = {"glucose": [*reading, {"delta": 17, "trend": "SingleUp"}]}
+    assert _product_policy(case_id, step, correct, expected, wire, "loaded") == []
+    assert _release_differences(case_id, step, expected, correct, _fields_different(expected, correct)) == ({}, {})
+
+    actual = {"glucose": [*reading, {"delta": 17, **observed_direction}]}
+    failures = _product_policy(case_id, step, actual, expected, wire, "loaded")
+    assert len(failures) == 1
+    assert failures[0].startswith("product.legacy raw SGV direction ")
+    raw = _fields_different(expected, actual)
+    mismatches, declared = _release_differences(case_id, step, expected, actual, raw)
+    assert raw == mismatches and set(mismatches) == {"glucose"}
+    assert declared == {}
 
 
 async def test_supplemental_late_calendar_fault(freezer, hass_storage, tmp_path, socket_enabled):
