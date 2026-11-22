@@ -1,0 +1,41 @@
+name: CodeQL (advanced opt-in)
+
+on:
+  push:
+    branches: [main]
+  # Include pull requests against intermediate branches in a stack.
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 3"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # Off while GitHub-managed default setup is on; see docs/code-scanning.md.
+    if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Scan the Python integration, bundled card and GitHub Actions workflows.
+        language: [python, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}
