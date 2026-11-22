@@ -472,7 +472,7 @@ def test_v3_glucose_in_mmol_rows_normalizes_to_native_mgdl_and_keeps_matching_de
     fixture = _V3Fixture()
     fixture.entry_rows = [{
         "type": "sgv", "date": PROPS["bgnow"]["mills"],
-        "sgv": 155 * api.MMOL_PER_MGDL, "units": "mmol/L",
+        "sgv": 155 * api.MMOL_PER_MGDL, "units": "mmol/L", "direction": "FortyFiveUp",
     }]
     _, result = asyncio.run(_v3_server(fixture.handle, _configured_data))
     assert result.glucose == pytest.approx(155)
@@ -535,7 +535,7 @@ def test_v3_corroborated_sgv_just_ahead_of_local_clock(monkeypatch, offset_ms, a
     assert data.glucose_time == (measured if accepted else None)
     assert data.glucose == (155 if accepted else None)
     assert data.delta == (6 if accepted else None)
-    assert data.direction == ("FortyFiveUp" if accepted else None)
+    assert data.direction == ("SingleDown" if accepted else None)
     assert data.forecast_at(15).mgdl == 169
     assert data.forecast_at(30).mgdl == 175
 

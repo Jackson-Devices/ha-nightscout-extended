@@ -32,6 +32,7 @@ MMOL = UnitOfBloodGlucoseConcentration.MILLIMOLE_PER_LITER
 
 # Nightscout's trend names (direction plugin) -> HA state keys, which must be snake_case.
 DIRECTIONS = {
+    "TripleUp": "triple_up",
     "DoubleUp": "double_up",
     "SingleUp": "single_up",
     "FortyFiveUp": "forty_five_up",
@@ -39,6 +40,7 @@ DIRECTIONS = {
     "FortyFiveDown": "forty_five_down",
     "SingleDown": "single_down",
     "DoubleDown": "double_down",
+    "TripleDown": "triple_down",
     "NOT COMPUTABLE": "not_computable",
     "RATE OUT OF RANGE": "rate_out_of_range",
     "NONE": "none",
