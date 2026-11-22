@@ -3,10 +3,12 @@
 ## Reporting a vulnerability
 
 Open the affected repository on GitHub. Under **Security and quality** (or
-**Security**), open **Advisories** and select **Report a vulnerability**. If a
-fork does not offer private reporting, check the upstream repository's
-security policy for its private reporting route. Keep security details out of
-public issues and pull requests.
+**Security**), open **Advisories** and select **Report a vulnerability**. If the
+button is unavailable, check the affected repository and its upstream for a
+documented private reporting channel. If neither publishes one, ask a
+maintainer only for their preferred private security contact. Keep
+vulnerability details, code, site URLs and clinical data out of public
+issues, discussions and pull requests.
 [GitHub's private reporting instructions](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately)
 
 Include the affected release or commit, the relevant Home Assistant and
