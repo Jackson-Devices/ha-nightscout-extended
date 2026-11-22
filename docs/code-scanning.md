@@ -14,6 +14,12 @@ Draft pull requests run preflight only. Ready pull requests, including ones just
 qualifying pushes to `main`, manual Validate runs and the weekly run start full validation after preflight
 passes. Superseded runs in the same concurrency group are cancelled.
 
+The manual CodeQL entry and tag-release entry each require a successful preflight in their own run.
+The scan implementation is reusable-only. No workflow input can attest that a preflight passed.
+The cheap job also checks the dependency graph for each repository workflow. A newly introduced workflow
+or job must satisfy this policy before it can join the approved graph. These checks apply to the workflow
+revision GitHub executes. Repository administrators control workflow changes and GitHub-managed services.
+
 To run checks manually, open **Actions**, select **Validate** for full validation or select the workflow
 defined in [`codeql.yml`](../.github/workflows/codeql.yml) for preflight and CodeQL alone. Choose
 **Run workflow** and select the branch. GitHub requires the workflow to exist on the default branch for
