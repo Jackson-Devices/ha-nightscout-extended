@@ -107,6 +107,16 @@ def _num(value: Any) -> float | None:
         return None
 
 
+def _treatment_number(value: Any) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        value = float(value)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def parse_properties(props: dict[str, Any]) -> NightscoutData:
     """Turn a /api/v2/properties response into NightscoutData.
 
@@ -153,16 +163,6 @@ def _parse_time(item: dict[str, Any]) -> datetime | None:
         except ValueError:
             pass
     return _ms_to_dt(item.get("mills") or item.get("date"))
-
-
-def _treatment_number(value: Any) -> float | None:
-    if type(value) not in (int, float):
-        return None
-    try:
-        value = float(value)
-    except OverflowError:
-        return None
-    return value if math.isfinite(value) else None
 
 
 def parse_treatments(items: Any) -> list[Treatment]:
