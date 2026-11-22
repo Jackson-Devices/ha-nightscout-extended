@@ -32,6 +32,8 @@ def contract(tmp_path, monkeypatch):
         "properties": {
             "created_at": {"type": "string"},
             "carbs": {"type": "number"},
+            "insulin": {"type": "number"},
+            "duration": {"type": "number"},
             "extensions": {
                 "type": "object",
                 "additionalProperties": {"type": "number"},
@@ -240,17 +242,25 @@ def test_schema_evidence_does_not_hide_wrong_legacy_treatment_value(contract):
         check(gate, path, [{**stock_rows[0], "insulin": "wrong"}])
 
 
-def test_v3_native_carbs_text_still_reports_published_schema_difference(contract):
+@pytest.mark.parametrize("field", ["carbs", "insulin"])
+@pytest.mark.parametrize("stored", ["0", "invalid", True, [6.5]])
+def test_native_treatment_quantities_follow_the_endpoint(contract, field, stored):
     gate, _ = contract
-    row = {"created_at": "2026-11-22T12:35:00.000Z", "carbs": "0"}
+    row = {"created_at": "2026-11-22T12:35:00.000Z", field: stored}
     envelope = {"status": 200, "result": [row]}
-    with pytest.raises(PublishedResponseDifference, match=r"carbs.*type"):
+    with pytest.raises(PublishedResponseDifference, match=rf"{field}.*type"):
         check(gate, "/api/v3/treatments", envelope)
-    assert type(row["carbs"]) is str
-    with pytest.raises(ContractViolation, match=r"carbs.*invalid consumed field"):
+    assert row[field] is stored
+    with pytest.raises(ContractViolation, match=rf"{field}.*invalid consumed field"):
         check(gate, "/api/v1/treatments.json", [row])
-    with pytest.raises(ContractViolation, match=r"carbs.*invalid consumed field"):
-        check(gate, "/api/v3/treatments", {"status": 200, "result": [{**row, "carbs": "wrong"}]})
+
+
+def test_legacy_duration_is_not_one_of_the_two_coerced_fields(contract):
+    gate, _ = contract
+    row = {"created_at": "2026-11-22T12:35:00.000Z", "duration": "30"}
+    with pytest.raises(PublishedResponseDifference, match=r"duration.*type"):
+        check(gate, "/api/v1/treatments.json", [row])
+    assert row["duration"] == "30"
 
 
 def test_published_diagnostics_omit_dynamic_property_names_and_values(contract):

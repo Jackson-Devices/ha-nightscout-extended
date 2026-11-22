@@ -9,6 +9,11 @@ Pinned stock Nightscout 15.0.6 code and its observed wire behavior define parity
 
 ## Fork main and PR 10
 
+On a v1 treatment GET the stock serializer applies JavaScript `Number()` to `carbs` and `insulin`.
+It leaves `duration` alone. The v3 generic search resolves document dates and preserves the stored
+JSON types of these quantities. Comparisons use each endpoint’s actual response, including when a
+published numeric schema disagrees. [Stock v1 serializer](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api/treatments/index.js#L39-L42) · [Stock v3 search](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api3/generic/search/operation.js#L48)
+
 The main snapshot at `19ae6e74` and PR 10 at `314f314042c99496bc3e85146013bf2644edf7ec` have the same `api.py`, `coordinator.py`, and `config_flow.py` blobs. The only integration HTTP operations at either revision are the GETs below. The card consumes Home Assistant entities and does not add a Nightscout read. Stock v3 assertions exercise server capability and wire parity. Integration v3 projection, raw SGV history, pump reservoir, equipment ages and a widened calendar overlap read are unavailable at both snapshots. [Main API](https://github.com/Jackson-Devices/ha-nightscout-extended/blob/19ae6e74/custom_components/nightscout_extended/api.py#L205-L274), [PR 10 API](https://github.com/Jackson-Devices/ha-nightscout-extended/blob/314f314042c99496bc3e85146013bf2644edf7ec/custom_components/nightscout_extended/api.py#L205-L274), [PR 10 coordinator](https://github.com/Jackson-Devices/ha-nightscout-extended/blob/314f314042c99496bc3e85146013bf2644edf7ec/custom_components/nightscout_extended/coordinator.py#L43-L79)
 
 | Caller GET | Request and response checked | Consumed fields and clocks |

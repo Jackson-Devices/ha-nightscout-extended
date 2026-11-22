@@ -543,18 +543,14 @@ def _treatment_fields(row, label, *, v3=False):
         )
     for key in ("_id", "identifier", "eventType", "notes", "enteredBy"):
         _optional(row, key, _string, label)
-    # Null quantities are a known v1 serializer divergence. The original
-    # Swagger schema still checks and rejects null where it declares numbers.
-    for key in ("carbs", "insulin", "duration"):
-        value = row.get(key)
-        # V3 preserves stored numeric text for carbs. Keep the raw value for
-        # both the published-schema diagnostic and the exact stock comparison.
-        if (v3 and key == "carbs" and isinstance(value, str)
-                and re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", value)
-                and math.isfinite(float(value))):
-            continue
-        if value is not None:
-            _optional(row, key, _is_number, label)
+    # Stock v1 serveTreatments applies Number() to exactly these two fields.
+    # Its JSON serialization can yield null. Stock v3 generic search resolves
+    # dates but passes through stored quantities. The published schema still
+    # checks every field, and the stock comparison observes each original value.
+    if not v3:
+        for key in ("carbs", "insulin"):
+            if row.get(key) is not None:
+                _optional(row, key, _is_number, label)
 
 
 def _device_fields(row, label):
