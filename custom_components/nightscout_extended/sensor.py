@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import UnitOfBloodGlucoseConcentration, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -51,6 +51,7 @@ class NightscoutSensorDescription(SensorEntityDescription):
     attrs_fn: Callable[[NightscoutData], dict[str, Any]] | None = None
     glucose: bool = False  # follows the site's mg/dL or mmol/L setting
     available_fn: Callable[[NightscoutData], bool] | None = None
+    freshness_key: str | None = None
 
 
 def _forecast_attrs(
@@ -124,6 +125,7 @@ def _age_description(signal: AgeSignal) -> NightscoutSensorDescription:
 SENSORS: tuple[NightscoutSensorDescription, ...] = (
     NightscoutSensorDescription(
         key="glucose",
+        freshness_key="glucose",
         translation_key="glucose",
         glucose=True,
         device_class=SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION,
@@ -133,6 +135,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
     ),
     NightscoutSensorDescription(
         key="glucose_delta",
+        freshness_key="glucose",
         translation_key="glucose_delta",
         glucose=True,
         device_class=SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION,
@@ -141,6 +144,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
     ),
     NightscoutSensorDescription(
         key="glucose_trend",
+        freshness_key="glucose",
         translation_key="glucose_trend",
         device_class=SensorDeviceClass.ENUM,
         options=list(DIRECTIONS.values()),
@@ -197,6 +201,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
     ),
     NightscoutSensorDescription(
         key="forecast_15",
+        freshness_key="forecast_15",
         translation_key="forecast_15",
         glucose=True,
         device_class=SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION,
@@ -205,6 +210,7 @@ SENSORS: tuple[NightscoutSensorDescription, ...] = (
     ),
     NightscoutSensorDescription(
         key="forecast_30",
+        freshness_key="forecast_30",
         translation_key="forecast_30",
         glucose=True,
         device_class=SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION,
@@ -264,6 +270,22 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
             self._attr_suggested_display_precision = 1 if coordinator.units == UNIT_MMOL else 0
         self._attr_device_info = device_info(coordinator)
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (key := self.entity_description.freshness_key) is not None:
+            self.async_on_remove(self.coordinator.async_add_freshness_listener(key, self._async_freshness_changed))
+
+    @callback
+    def _async_freshness_changed(self) -> None:
+        if not self.available:
+            return
+        description = self.entity_description
+        data = self.coordinator.data
+        if description.value_fn(data) is not None or (
+            description.key == "glucose" and (data.delta is not None or data.direction is not None)
+        ):
+            self.async_write_ha_state()
+
     @property
     def available(self) -> bool:
         if not super().available:
@@ -282,6 +304,8 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | int | str | datetime | None:
+        if (key := self.entity_description.freshness_key) is not None and self.coordinator.signal_expired(key):
+            return None
         value = self.entity_description.value_fn(self.coordinator.data)
         if isinstance(value, float) and value.is_integer():
             return int(value)  # Nightscout's mg/dL values are whole numbers; avoid "155.0"
@@ -295,6 +319,8 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
             else None
         )
         if self.entity_description.key == "glucose":
+            if self.coordinator.signal_expired("glucose"):
+                attrs = {"direction": None, "delta": None}
             # For the bundled card: colour the reading by the site's own alarm levels.
             attrs = {
                 **(attrs or {}),
