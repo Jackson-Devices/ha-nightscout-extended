@@ -1,0 +1,50 @@
+name: Workflow lint
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: ''
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check Python and card syntax
+        shell: bash
+        run: |
+          python -m compileall -q custom_components/nightscout_extended tests tests_ha
+          node --check custom_components/nightscout_extended/www/nightscout-glucose-card.js
+      - name: Lint workflows and changelog script
+        shell: bash
+        run: |
+          if ! shellcheck_bin=$(command -v shellcheck); then
+            echo 'ShellCheck is required to lint workflow shell steps and scripts.' >&2
+            exit 1
+          fi
+
+          lint_dir=$(mktemp -d "$RUNNER_TEMP/actionlint.XXXXXX")
+          archive="$lint_dir/actionlint.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$lint_dir" actionlint
+
+          git ls-files -z -- ':(glob).github/workflows/*.yml' ':(glob).github/workflows/*.yaml' > "$lint_dir/workflows"
+          mapfile -d '' -t workflows < "$lint_dir/workflows"
+          "$lint_dir/actionlint" -shellcheck "$shellcheck_bin" "${workflows[@]}"
+          "$shellcheck_bin" .github/scripts/changelog-section.sh
