@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Qualify one pinned stock Nightscout against three isolated real-HA profiles.
+"""Qualify one pinned stock Nightscout against isolated real-HA profiles.
 
 Run from the QA checkout with separately staged product trees and HA Python:
 python tests_contract/stock/run_stock.py --upstream PATH --candidate PATH \
     --ha-python PATH --output PATH
+
+Append --legacy-repair PATH to compare a separate repaired legacy checkout
+under the same anonymous role, fixture, and observation time.
 
 Output is a credential-free JSON file. Exit 0 means all gates passed, 1 means
 a schema or observed product mismatch, and 2 means a native or harness failure.
@@ -154,9 +157,12 @@ def run(args, report):
     lock, lock_hash = read_lock()
     raw.check(lock["server"]["nightscout"] == raw.IMAGE, "unexpected_stock_image_in_lock")
     raw.check((STOCK / "ha_probe.py").is_file() and args.ha_python.is_file(), "missing_ha_probe_or_python")
-    raw.check(all((tree / "custom_components").is_dir() for tree in (args.upstream, args.candidate)),
+    roots = [args.upstream, args.candidate]
+    if args.legacy_repair is not None:
+        roots.append(args.legacy_repair)
+    raw.check(all((tree / "custom_components").is_dir() for tree in roots),
               "missing_staged_product")
-    raw.check(args.upstream != args.candidate, "same_staged_product_root")
+    raw.check(len(set(roots)) == len(roots), "same_staged_product_root")
     report["provider"] = {"version": raw.VERSION, "upstream_commit": raw.SOURCE,
                           "images": lock["server"], "lock_sha256": lock_hash}
     report["schema"] = {"status": "harness_error", "phase": "swagger_validator_dependency"}
@@ -208,6 +214,10 @@ def read_and_compare(args, report, disposable, port, anchor, fixture, wire):
         tree = args.upstream if mode == "upstream_legacy" else args.candidate
         results[mode] = child_record(args.ha_python, tree, mode, origin, subject, expected,
                                      raw.utc(anchor), secret_strings)
+    if args.legacy_repair is not None:
+        results["repaired_legacy"] = repaired_legacy(
+            args.ha_python, args.legacy_repair, origin, expected, raw.utc(anchor), secret_strings,
+        )
     after = raw.snapshot(wire, reader, fixture, anchor)
     stable = raw.stable_view(before) == raw.stable_view(after)
     report["native_stability"] = {
@@ -222,6 +232,31 @@ def read_and_compare(args, report, disposable, port, anchor, fixture, wire):
         return "harness_error"
     native_shape_failed = bool(before["treatment_wire_source"]["fixture_shape_differences"])
     return "mismatch" if native_shape_failed or "mismatch" in outcomes else "pass"
+
+
+def repaired_legacy(executable, product, origin, expected, observed_at, prohibited):
+    component = product / "custom_components" / "nightscout_extended"
+    try:
+        manifest = hashlib.sha256((component / "manifest.json").read_bytes()).hexdigest()
+        calendar = hashlib.sha256((component / "calendar.py").read_bytes()).hexdigest()
+    except OSError:
+        return {"mode": "upstream_legacy", "status": "harness_error", "phase": "repair_source_unreadable"}
+
+    result = child_record(executable, product, "upstream_legacy", origin, None, expected, observed_at, prohibited)
+    attestation = result.setdefault("attestation", {})
+    loaded = attestation.get("source_files_sha256")
+    matched = (attestation.get("exact_product_root") is True
+               and attestation.get("exact_product_package") is True
+               and attestation.get("manifest_sha256") == manifest
+               and isinstance(loaded, dict)
+               and loaded.get("calendar.py") == calendar)
+    attestation["designated_checkout"] = {
+        "resolved_root_sha256": hashlib.sha256(os.fsencode(product)).hexdigest(),
+        "manifest_sha256": manifest, "calendar_sha256": calendar, "matches_loaded_source": matched,
+    }
+    if result["status"] == "pass" and not matched:
+        result.update(status="harness_error", phase="repair_source_attestation")
+    return result
 
 
 def save(path, report):
@@ -241,11 +276,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", required=True, type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
+    parser.add_argument("--legacy-repair", type=Path)
     parser.add_argument("--ha-python", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     args.upstream = args.upstream.resolve()
     args.candidate = args.candidate.resolve()
+    if args.legacy_repair is not None:
+        args.legacy_repair = args.legacy_repair.resolve()
     # Preserve the chosen virtual environment's executable symlink.
     args.ha_python = args.ha_python.absolute()
     report = {"schema_version": SCHEMA_VERSION}
