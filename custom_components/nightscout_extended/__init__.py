@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from homeassistant.const import CONF_API_KEY, CONF_URL, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
@@ -37,7 +39,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: NightscoutConfigEntry) -
     except NightscoutConnectionError as err:
         raise ConfigEntryNotReady(f"Could not reach Nightscout: {err}") from err
 
-    units = (status.get("settings") or {}).get("units", "mg/dl")
+    settings = status.get("settings")
+    units = (settings if isinstance(settings, Mapping) else {}).get("units", "mg/dl")
     coordinator = NightscoutCoordinator(
         hass, entry, client, UNIT_MMOL if str(units).lower().startswith("mmol") else UNIT_MGDL
     )
