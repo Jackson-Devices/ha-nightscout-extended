@@ -252,12 +252,14 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         raw_available = not isinstance(history, BaseException)
 
         data = properties if isinstance(properties, NightscoutData) else NightscoutData()
-        if self.uses_v3 or not calculations_available:
-            sample = (
-                self.history.select_current(now, data.glucose_time, data.glucose)
-                if raw_available
-                else None
-            )
+        sample = (
+            self.history.select_current(now, data.glucose_time, data.glucose, observed=history)
+            if not isinstance(history, BaseException)
+            else None
+        )
+        # Legacy properties remain a fallback when no eligible raw row was
+        # observed. V3 still treats its versioned history as authoritative.
+        if self.uses_v3 or not calculations_available or sample is not None:
             _apply_v3_glucose(data, sample)
 
         if isinstance(treatments, list):
