@@ -10,15 +10,15 @@ def test_legacy_duplicate_backfill_uses_explicit_identity_and_retains_anonymous_
     at = "2026-01-01T12:00:00.000Z"
     original = {
         "_id": "dose", "identifier": "dose-alias", "created_at": at, "eventType": "Meal Bolus",
-        "insulin": "1.5", "srvModified": 100,
+        "insulin": 1.5, "srvModified": 100,
     }
     edit = {
         "identifier": "dose-alias", "created_at": at, "eventType": "Meal Bolus",
-        "insulin": "2.5", "srvModified": 200,
+        "insulin": 2.5, "srvModified": 200,
     }
     independent = {
         "_id": "separate", "created_at": at, "eventType": "Meal Bolus",
-        "carbs": "24.5", "insulin": 0,
+        "carbs": 24.5, "insulin": 0,
     }
     untracked = {"created_at": at, "eventType": "Note"}
     doomed = {"_id": "deleted", "created_at": at, "insulin": 999, "srvModified": 300}
@@ -48,7 +48,7 @@ def test_v3_treatment_quantities_require_finite_json_numbers_without_losing_even
     at = int(start.timestamp() * 1_000)
     rows = [
         {"identifier": "correct", "date": at + 1_000, "insulin": 2.5, "carbs": 12.75, "duration": 20.5},
-        {"identifier": "zero", "date": at + 2_000, "insulin": 0, "carbs": 0},
+        {"identifier": "zero", "date": at + 2_000, "insulin": 0, "carbs": 0, "duration": 0},
         {"identifier": "strings", "date": at + 3_000, "insulin": "7.25", "carbs": "31.2",
          "duration": "60", "eventType": "Note", "notes": "Reading retained", "enteredBy": "Fixture"},
         {"identifier": "invalid", "date": at + 4_000, "insulin": True, "carbs": float("inf"), "duration": {}},
@@ -63,7 +63,8 @@ def test_v3_treatment_quantities_require_finite_json_numbers_without_losing_even
     assert [t.uid for t in treatments] == ["correct", "zero", "strings", "invalid"]
     assert (treatments[0].insulin, treatments[0].carbs, treatments[0].duration_min) == (2.5, 12.75, 20.5)
     assert treatments[2].summary == "Reading retained" and treatments[2].entered_by == "Fixture"
-    assert all(t.insulin is None and t.carbs is None and t.duration_min is None for t in treatments[1:])
+    assert (treatments[1].insulin, treatments[1].carbs, treatments[1].duration_min) == (0, 0, 0)
+    assert all(t.insulin is None and t.carbs is None and t.duration_min is None for t in treatments[2:])
     data = api.NightscoutData(treatments=treatments)
     assert data.last_treatment("insulin", end).uid == "correct"
     assert data.last_treatment("carbs", end).uid == "correct"

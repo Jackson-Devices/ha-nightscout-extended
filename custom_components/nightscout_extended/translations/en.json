@@ -60,6 +60,7 @@
       "glucose_trend": {
         "name": "Glucose trend",
         "state": {
+          "triple_up": "Rising very quickly",
           "double_up": "Rising quickly",
           "single_up": "Rising",
           "forty_five_up": "Rising slightly",
@@ -67,6 +68,7 @@
           "forty_five_down": "Falling slightly",
           "single_down": "Falling",
           "double_down": "Falling quickly",
+          "triple_down": "Falling very quickly",
           "not_computable": "Not computable",
           "rate_out_of_range": "Rate out of range",
           "none": "None"

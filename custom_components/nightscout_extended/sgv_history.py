@@ -349,12 +349,13 @@ class SGVHistory:
 
     async def _refresh_legacy(
         self, state: _Snapshot | None, start: int, end: int, now: int
-    ) -> _Snapshot:
+    ) -> tuple[_Snapshot, frozenset[str]]:
         # V1 reads give positive observations, with no deletion tombstones.
         # Omitted IDs retain their exact last observed values and dates until expiry.
         rows = {} if state is None else {row.id: row for row in state.rows if start <= row.date < end}
-        rows.update(await self._read_window(start, end))
-        return _Snapshot(False, None, start, end, now, now, _ordered(rows))
+        observed = await self._read_window(start, end)
+        rows.update(observed)
+        return _Snapshot(False, None, start, end, now, now, _ordered(rows)), frozenset(observed)
 
     async def _read_changes(self, after: int) -> tuple[list[dict[str, Any]], int]:
         changes, checkpoint = await self._source.read_changes(after)
@@ -386,8 +387,8 @@ class SGVHistory:
         _apply_changes(rows, changes, start, end)
         return _Snapshot(True, checkpoint, start, end, now, state.reconciled, _ordered(rows)), changes
 
-    async def async_refresh(self, now: datetime) -> None:
-        """Drain changes and commit the result with its matching cursor."""
+    async def async_refresh(self, now: datetime) -> frozenset[str] | None:
+        """Commit history and return the IDs observed in a successful legacy scan."""
         checked = _ceil_ms(now)
         start = checked - self._window
         end = checked + _CLOCK_SKEW_MS
@@ -397,8 +398,9 @@ class SGVHistory:
             await self._load_locked()
             state = self._state
             uses_v3 = self._source.uses_v3
+            legacy_observed = None
             if not uses_v3:
-                candidate = await self._refresh_legacy(state, start, end, checked)
+                candidate, legacy_observed = await self._refresh_legacy(state, start, end, checked)
                 changes = []
             elif (
                 state is None
@@ -426,13 +428,15 @@ class SGVHistory:
                 self._update_overflow(changes)
             if cancelled:
                 raise asyncio.CancelledError
+            return legacy_observed
 
     def select_current(
-        self, now: datetime, bgnow_time: datetime | None, bgnow_value: float | None
+        self, now: datetime, bgnow_time: datetime | None, bgnow_value: float | None,
+        *, observed: frozenset[str] | None = None,
     ) -> tuple[datetime, float, str | None] | None:
-        """Select the latest glucose with the existing v3 clock/quality rules."""
+        """Select the latest eligible glucose, optionally limited to the latest v1 observations."""
         state = self._state
-        if self._gate.removed or state is None:
+        if self._gate.removed or state is None or (observed is not None and not observed):
             return None
         if now.utcoffset() is None or (bgnow_time is not None and bgnow_time.utcoffset() is None):
             raise ValueError("SGV current timestamps must include a timezone")
@@ -443,7 +447,7 @@ class SGVHistory:
         for reading in reversed(state.rows):
             if reading.date < earliest:
                 break
-            if reading.sgv <= 39:
+            if reading.sgv <= 39 or (observed is not None and reading.id not in observed):
                 continue
             when = _from_ms(reading.date)
             if when <= now or (
