@@ -1,9 +1,9 @@
 """Parsing and auth tests. They load api.py directly, so Home Assistant isn't needed."""
 
 import asyncio
-import hashlib
 import importlib.util
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -121,6 +121,10 @@ def test_malformed_forecast_points_keep_usable_siblings_and_independent_horizons
 
 SECRET = "averylongapisecret"
 
+# RFC 3174 section 7.3 TEST1 (https://www.rfc-editor.org/rfc/rfc3174#section-7.3).
+LEGACY_WIRE_INPUT = "abc"
+LEGACY_WIRE_SHA1 = "a9993e364706816aba3e25717850c26c9cd0d89d"
+
 
 async def _serve(handler_check):
     app = web.Application()
@@ -165,8 +169,10 @@ def test_token_auth():
 
 
 def test_api_secret_fallback():
-    digest = hashlib.sha1(SECRET.encode()).hexdigest()
-    c, _, data = _run(lambda r: r.headers.get("api-secret") == digest, SECRET)
+    c, _, data = _run(
+        lambda request: request.headers.get("api-secret") == LEGACY_WIRE_SHA1,
+        LEGACY_WIRE_INPUT,
+    )
     assert c.uses_api_secret and data.iob == 1.35
 
 
@@ -179,43 +185,59 @@ def test_wrong_credential_raises_auth_error():
 
 
 def test_redirect_to_other_host_is_refused_and_not_followed():
-    seen = []
+    redaction_sentinel = "readable-abc123"
+    sink_path = "/redirect-sink"
+    sink_hits = 0
 
     async def go():
-        evil = web.Application()
-
-        async def capture(request):
-            seen.append((request.query.get("token"), request.headers.get("api-secret")))
+        async def count_hit(_request):
+            nonlocal sink_hits
+            sink_hits += 1
             return web.json_response({})
 
-        evil.router.add_get("/{p:.*}", capture)
-        evil_runner = web.AppRunner(evil); await evil_runner.setup()
-        evil_site = web.TCPSite(evil_runner, "127.0.0.1", 0); await evil_site.start()
-        evil_port = evil_site._server.sockets[0].getsockname()[1]
-
-        app = web.Application()
-
-        async def redirect(request):
-            raise web.HTTPFound(f"http://127.0.0.1:{evil_port}{request.path_qs}")
-
-        app.router.add_get("/{p:.*}", redirect)
-        runner = web.AppRunner(app); await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0); await site.start()
-        port = site._server.sockets[0].getsockname()[1]
+        sink = web.Application()
+        sink.router.add_get(sink_path, count_hit)
+        sink_runner = web.AppRunner(sink, access_log=None)
+        await sink_runner.setup()
         try:
-            async with aiohttp.ClientSession() as s:
-                c = api.NightscoutClient(s, f"http://127.0.0.1:{port}", "readable-abc123")
-                try:
-                    await c.async_get_status()
-                except api.NightscoutConnectionError as err:
-                    return str(err)
+            sink_site = web.TCPSite(sink_runner, "127.0.0.1", 0)
+            await sink_site.start()
+            sink_port = sink_runner.addresses[0][1]
+            location = (
+                f"http://127.0.0.1:{sink_port}{sink_path}"
+                f"?token={redaction_sentinel}"
+            )
+
+            async def redirect(_request):
+                raise web.HTTPFound(location)
+
+            app = web.Application()
+            app.router.add_get("/{p:.*}", redirect)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            try:
+                site = web.TCPSite(runner, "127.0.0.1", 0)
+                await site.start()
+                port = runner.addresses[0][1]
+                async with aiohttp.ClientSession() as session:
+                    client = api.NightscoutClient(
+                        session, f"http://127.0.0.1:{port}", redaction_sentinel
+                    )
+                    try:
+                        await client.async_get_status()
+                    except api.NightscoutConnectionError as err:
+                        return str(err)
+            finally:
+                await runner.cleanup()
         finally:
-            await runner.cleanup(); await evil_runner.cleanup()
+            await sink_runner.cleanup()
 
     msg = asyncio.run(go())
-    assert msg and "redirected" in msg
-    assert "readable-abc123" not in msg  # token in the Location URL is redacted
-    assert seen == []  # the other host never received anything
+    if not msg or "redirected" not in msg:
+        raise AssertionError("The expected redirect refusal was not reported.")
+    if redaction_sentinel in msg:
+        raise AssertionError("The redirect error exposed the redaction sentinel.")
+    assert sink_hits == 0
 
 
 def test_errors_never_contain_the_credential():
@@ -627,14 +649,15 @@ def test_secret_classification_retries_when_only_protected_legacy_read_denies_qu
         if request.path == "/api/v1/status.json":
             return web.json_response({"settings": {}})
         assert request.path.startswith("/api/v2/properties/")
-        digest = hashlib.sha1(SECRET.encode()).hexdigest()
-        return web.json_response(PROPS) if request.headers.get("api-secret") == digest else web.Response(status=401)
+        if request.headers.get("api-secret") == LEGACY_WIRE_SHA1:
+            return web.json_response(PROPS)
+        return web.Response(status=401)
 
     async def exercise(client):
         await client.async_get_status()
         assert client.uses_api_secret
 
-    asyncio.run(_v3_server(handle, exercise, SECRET))
+    asyncio.run(_v3_server(handle, exercise, LEGACY_WIRE_INPUT))
 
 
 @pytest.mark.parametrize("status", [401, 403, 503])
@@ -754,26 +777,43 @@ def test_v3_treatments_never_return_a_partial_later_page(failure):
 
 def test_v3_exchange_redirect_never_follows_or_surfaces_credential_path():
     fixture = _V3Fixture()
-    seen = []
+    escaped_subject = quote(_V3_SUBJECT, safe="")
+    sink_path = f"{_EXCHANGE}{escaped_subject}"
+    sink_hits = 0
 
-    async def foreign(request):
-        seen.append(True)
-        return web.json_response({})
+    async def go():
+        async def count_hit(_request):
+            nonlocal sink_hits
+            sink_hits += 1
+            return web.json_response({})
 
-    async def exercise_foreign(foreign_client):
-        async def handle(request):
-            if request.path.startswith(_EXCHANGE):
-                raise web.HTTPFound(f"{foreign_client.url}{request.raw_path}")
-            return await fixture.handle(request)
+        sink = web.Application()
+        sink.router.add_get("/{tail:.*}", count_hit)
+        sink_runner = web.AppRunner(sink, access_log=None)
+        await sink_runner.setup()
+        try:
+            sink_site = web.TCPSite(sink_runner, "127.0.0.1", 0)
+            await sink_site.start()
+            sink_port = sink_runner.addresses[0][1]
+            location = f"http://127.0.0.1:{sink_port}{sink_path}"
 
-        async def exercise_source(client):
-            await client.async_get_status()
+            async def handle(request):
+                if request.path.startswith(_EXCHANGE):
+                    raise web.HTTPFound(location)
+                return await fixture.handle(request)
 
-        with pytest.raises(api.NightscoutConnectionError, match="authorization exchange.*redirected") as err:
-            await _v3_server(handle, exercise_source)
-        message = str(err.value)
-        assert bool(_V3_SUBJECT not in message and quote(_V3_SUBJECT, safe="") not in message)
-        assert _EXCHANGE not in message
+            async def exercise_source(client):
+                await client.async_get_status()
 
-    asyncio.run(_v3_server(foreign, exercise_foreign))
-    assert seen == []
+            with pytest.raises(api.NightscoutConnectionError) as err:
+                await _v3_server(handle, exercise_source, _V3_SUBJECT)
+            message = str(err.value)
+            if not re.search("authorization exchange.*redirected", message):
+                raise AssertionError("The expected redirect refusal was not reported.")
+            if any(value in message for value in (_V3_SUBJECT, escaped_subject, _EXCHANGE)):
+                raise AssertionError("The redirect error exposed the exchange path or credential.")
+        finally:
+            await sink_runner.cleanup()
+
+    asyncio.run(go())
+    assert sink_hits == 0
