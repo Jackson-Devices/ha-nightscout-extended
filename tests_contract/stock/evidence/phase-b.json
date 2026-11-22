@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "evidence": "Independent verifier summary of the stock, HA, and OpenAPI batch. All times and readings are synthetic.",
+  "run": {
+    "qa": "e46f55df3482f3d19ac7c74df8ac78c63e6153ff",
+    "product": "c8a6832499290a65329767d3e4a0615efaf94bbc",
+    "original_legacy": "a8acabe41d6380f6647f9863c37bc9d776ffc9cc",
+    "standalone_calendar": "d9e50d78b0eefb607a68ca213615cd431259b185",
+    "standalone_quantities": "3594a99fbb77bd2c6ba30a8ac9551f915d5e95cb",
+    "server_source": "9cd304f78a5c12401c9711cbd56d2a12eaca0632",
+    "server_image": "docker.io/nightscout/cgm-remote-monitor:15.0.6@sha256:868f024f0aaf746aa9c6f639b4add7a78b07bcf4382f9955c5af61d413cad989",
+    "python": "3.14.4",
+    "home_assistant": "2026.10.4",
+    "ha_pytest_plugin": "0.13.375",
+    "initial_batch_wall_seconds": 118.911
+  },
+  "published_swagger_sha256": {
+    "v1": "c3777a701b3e319e515389dd2de4f3f0826e31a886b00a5957db880ca2f7b478",
+    "v3": "76e53f883a1604a763412b11e6d0ba61b902b8f1a529656d24175790fc59d7f6"
+  },
+  "schema": {
+    "verdict": "fail",
+    "distinct_diagnostics": 59,
+    "occurrences": 186,
+    "groups": [
+      [
+        "legacy_treatment_carbs_or_insulin_present_null",
+        26,
+        104
+      ],
+      [
+        "legacy_devicestatus_loop_object_instead_of_string",
+        2,
+        8
+      ],
+      [
+        "legacy_status_alarmTypes_enum",
+        2,
+        6
+      ],
+      [
+        "legacy_status_timeFormat_integer_instead_of_string",
+        2,
+        6
+      ],
+      [
+        "v3_generic_DocumentArray_array_instead_of_object",
+        5,
+        14
+      ],
+      [
+        "v3_generic_oneOf_zero_matching_alternatives",
+        4,
+        9
+      ],
+      [
+        "v3_generic_oneOf_multiple_matching_alternatives",
+        2,
+        5
+      ],
+      [
+        "v3_collection_rows_missing_app",
+        16,
+        34
+      ]
+    ],
+    "group_columns": [
+      "observed_pattern",
+      "distinct_route_or_field_diagnostics",
+      "observations_including_repeated_reads"
+    ],
+    "seed_provenance": "The initial entries, treatments, device-status and profile records were seeded in Mongo and read through stock. Missing app describes those observed records. The late insert used stock's authenticated v3 API.",
+    "failed_routes": [
+      "v1 status",
+      "v1 treatments",
+      "v1 devicestatus",
+      "v2 alias status",
+      "v2 alias treatments",
+      "v2 alias devicestatus",
+      "v3 devicestatus SEARCH",
+      "v3 entries SEARCH",
+      "v3 entries HISTORY",
+      "v3 profile SEARCH",
+      "v3 treatments SEARCH"
+    ],
+    "passed_routes": [
+      "v1 entries",
+      "v1 profile",
+      "v2 alias entries",
+      "v2 alias profile",
+      "v3 lastModified",
+      "v3 status",
+      "v3 version"
+    ],
+    "native_source_only": "calculated v2 properties",
+    "source_only_reads": 9,
+    "unverified_reads": 0,
+    "swagger_control_pass": 7
+  },
+  "shared_stock": {
+    "observed_at": "2026-11-22T14:05:00Z",
+    "permissions_matched": 35,
+    "permissions_compared": 35,
+    "snapshot_stable": true,
+    "reader_requests_all_http_200": true,
+    "readers": [
+      {
+        "mode": "original_legacy",
+        "exit": 1,
+        "http_requests": 4,
+        "missed": "Temp Basal 12:35–13:05 UTC"
+      },
+      {
+        "mode": "candidate_legacy",
+        "exit": 0,
+        "http_requests": 6
+      },
+      {
+        "mode": "candidate_v3",
+        "exit": 0,
+        "http_requests": 10
+      },
+      {
+        "mode": "repaired_legacy_calendar",
+        "exit": 0,
+        "http_requests": 4,
+        "recovered": "Temp Basal 12:35–13:05 UTC"
+      }
+    ],
+    "values": {
+      "glucose_mgdl": 180,
+      "source_time": "2026-11-22T14:04:00Z",
+      "delta_mgdl": 12,
+      "forecast_15": {
+        "mgdl": 199,
+        "target": "2026-11-22T14:19:02Z"
+      },
+      "forecast_30": {
+        "mgdl": 204,
+        "target": "2026-11-22T14:34:02Z"
+      },
+      "insulin_remaining_u": 0,
+      "pump_contact": "2026-11-22T14:03:00Z",
+      "iob_u": 1.375,
+      "cob_g": 7.5,
+      "basal_u_per_hour": 0.85,
+      "ages_hours": {
+        "sensor": 20,
+        "insulin": 40,
+        "cannula": 60,
+        "pump_battery": 96
+      },
+      "candidate_history": [
+        [
+          "13:54",
+          157
+        ],
+        [
+          "13:59",
+          168
+        ],
+        [
+          "14:04",
+          180
+        ]
+      ]
+    }
+  },
+  "controlled_replay": {
+    "cases": 8,
+    "passed": 8,
+    "v1_and_v3_positive": {
+      "mgdl": 162,
+      "original_time": "12:07:00",
+      "delta": "unknown"
+    },
+    "v1_denied": {
+      "http": 403,
+      "fallback_mgdl": 153,
+      "source_time": "12:00:00",
+      "delta_mgdl": 7
+    }
+  },
+  "clinical_source_rules_change_before": {
+    "tested_on": "7bae05bc332c2c61a252718edc4ba768abf21a46",
+    "semantic_failures": 12,
+    "passing_controls": 1
+  },
+  "counts": {
+    "stock_exit": 1,
+    "schema_distinct": 59,
+    "schema_occurrences": 186,
+    "source_only_reads": 9,
+    "unverified_reads": 0,
+    "permission_matches": 35,
+    "reader_exits": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "stock_glucose_mgdl": 180,
+    "stock_forecasts_mgdl": [
+      199,
+      204
+    ],
+    "reservoir_u": 0,
+    "matrix_pass": 8,
+    "swagger_pass": 7,
+    "api_collected_failed": [
+      197,
+      0
+    ],
+    "ha_collected_failed": [
+      87,
+      1
+    ],
+    "node_pass": 16,
+    "observer_pass": 6,
+    "integrated_pass_fail": [
+      13,
+      1
+    ],
+    "frozen_pass_mismatch": [
+      1,
+      12
+    ],
+    "h1_controls": [
+      0,
+      1,
+      1,
+      2
+    ],
+    "quantity_api_pass": 53,
+    "calendar_api_ha_pass": [
+      12,
+      16
+    ],
+    "before_pass_fail": [
+      1,
+      12
+    ],
+    "merge_tree_exit": 1,
+    "residue": [
+      0,
+      0,
+      0
+    ]
+  },
+  "coverage": {
+    "statements_percent": 92.36,
+    "branches_percent": 82.62,
+    "collection_has_no_per_test_skip_detail": true
+  },
+  "pre_repair_remaining": [
+    "Stale wall-clock fixture in test_glucose_sensor_exposes_site_thresholds",
+    "Old integrated expectation for positively known source trend in G-PUBLIC-DELTA",
+    "Sibling main PRs conflict on a helper insertion in api.py"
+  ],
+  "frozen": {
+    "cases_pass": 1,
+    "cases_mismatch": 12,
+    "field_differences": 69,
+    "harness_errors": 0,
+    "controls": [
+      0,
+      1,
+      1,
+      2
+    ]
+  },
+  "verifier_receipts_sha256": {
+    "phase_b": "9343da2d53e24df9ee97e67162d5d2c3b867df4636d58764027f0614c7cf0544",
+    "compact": "8bd8e571cb8e000256db1cfc1ef0b8d411ea1890a51e2eba18e972ae28183b70",
+    "coverage_data_json": "0e1ad5a49771b275d48f973fb292dcd5993bc9ffb9df275b2358e2ce5eef35aa",
+    "term_missing": "6234305f672f0493313e53502ee46d69d2d1ed1a8e270d43c2d5e4d500579c99"
+  }
+}
