@@ -1,0 +1,61 @@
+name: CodeQL (advanced opt-in)
+
+on:
+  workflow_call:
+    inputs:
+      preflight_passed:
+        description: A successful preflight for this commit already ran in the caller.
+        type: boolean
+        default: false
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ inputs.preflight_passed && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  preflight:
+    # The input is only available for workflow_call. A direct dispatch runs its own preflight.
+    if: ${{ !inputs.preflight_passed }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-lint.yml
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # Off while GitHub-managed default setup is on; see docs/code-scanning.md.
+    needs: preflight
+    # The caller already waited for its preflight. Allow only that intentional skip.
+    if: >-
+      ${{
+        !cancelled() && vars.CODEQL_ADVANCED_ENABLED == 'true' &&
+        ((inputs.preflight_passed && needs.preflight.result == 'skipped') ||
+         (!inputs.preflight_passed && needs.preflight.result == 'success'))
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        # Scan the Python integration, bundled card and GitHub Actions workflows.
+        language: [python, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}
