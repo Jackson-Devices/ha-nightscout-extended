@@ -1,42 +1,39 @@
 # Security policy
 
-## Supported versions
-
-Only the latest release gets security fixes. Update to it before reporting.
-
-| Version | Supported |
-|---|---|
-| Latest release | Yes |
-| Anything older | No |
-
 ## Reporting a vulnerability
 
-Please **don't open a public issue** for a security problem.
+Open the affected repository on GitHub. Under **Security and quality** (or
+**Security**), open **Advisories** and select **Report a vulnerability**. If a
+fork does not offer private reporting, check the upstream repository's
+security policy for its private reporting route. Keep security details out of
+public issues and pull requests.
+[GitHub's private reporting instructions](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately)
 
-Report it privately through GitHub instead:
-[Report a vulnerability](https://github.com/Jackson-Devices/ha-nightscout-extended/security/advisories/new)
-(the **Security** tab → **Report a vulnerability**).
+Include the affected release or commit, the relevant Home Assistant and
+Nightscout versions, and a short description of the expected behavior,
+observed behavior and impact. Use synthetic examples or redacted summaries.
+Omit credentials, site URLs containing authentication information, Home
+Assistant diagnostics and real patient data.
 
-Include what you found, how to reproduce it, the version you tested, and what an attacker could do with it.
-You should get a first reply within 7 days. Once a fix is released, the advisory is published with credit to you
-unless you'd rather stay anonymous.
+Use the private route for suspected security issues involving confidentiality,
+authentication or data integrity. That includes issues affecting the accuracy
+or timing of displayed glucose values, trends or timestamps, such as a stale
+reading shown as current.
 
-## What's in scope
+## CodeQL setup
 
-Problems in this repository's code, for example:
+Use one CodeQL setup per repository. GitHub rejects SARIF uploads from the
+advanced workflow while GitHub-managed default setup is active.
+[GitHub's CodeQL upload restriction](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/troubleshoot-sarif-uploads/default-setup-enabled)
 
-- the Nightscout access token or API secret leaking: into logs, diagnostics, error messages, or to a host other
-  than the one you configured;
-- the bundled glucose card running script or markup that came from Nightscout or Home Assistant state;
-- data from a Nightscout site being able to make the integration do something other than read values;
-- anything that weakens authentication between Home Assistant and Nightscout.
+With default setup enabled, leave `CODEQL_ADVANCED_ENABLED` unset and use the
+**Extended** query suite in the repository's CodeQL default setup settings if
+you want broader coverage.
+[Configure default setup](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/configure-code-scanning/configure-code-scanning)
 
-Bugs in Home Assistant or Nightscout themselves belong with those projects
-([Home Assistant](https://github.com/home-assistant/core/security/policy),
-[Nightscout](https://github.com/nightscout/cgm-remote-monitor)).
-
-## A note on safety
-
-This integration is not a medical device and must not be used to make treatment decisions. A bug that shows a
-wrong glucose value, colour or trend is still serious: if someone could trigger it deliberately, report it
-privately as above; otherwise open a normal issue so it gets fixed quickly.
+To opt into the advanced workflow, first switch the repository's CodeQL
+setting to advanced setup. Then set the repository Actions variable
+`CODEQL_ADVANCED_ENABLED` to `true`. The workflow uses the
+`security-extended` query suite for Python, JavaScript/TypeScript and
+GitHub Actions.
+[Configure advanced setup](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/configure-code-scanning/configuring-advanced-setup-for-code-scanning)

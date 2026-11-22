@@ -1,5 +1,4 @@
-# The integration has no Python or npm dependencies of its own (manifest.json "requirements" is empty and
-# there is no package.json), so the only thing to keep current is the GitHub Actions used by the workflows.
+# Track workflow actions and the dependencies installed by the Python test jobs.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,7 +7,22 @@ updates:
       interval: weekly
       day: monday
     groups:
-      actions:
+      actions-minor-patch:
         patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: pip
+    directories:
+      - /tests
+      - /tests_ha
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python-test-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
     commit-message:
       prefix: ci
