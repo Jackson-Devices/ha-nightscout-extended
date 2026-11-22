@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 
 LOCK = Path(__file__).resolve().parents[1] / "harness" / "versions.lock"
@@ -86,8 +87,13 @@ def collect(args):
         raise ValueError("Output must be a new or empty directory")
 
     output.mkdir(parents=True, exist_ok=True)
-    temp = output / "tmp"
-    temp.mkdir()
+    # The writable HA configuration may contain credentials from test fixtures.
+    # Retain the reports, while the runner owns and removes the fixture subtree.
+    with TemporaryDirectory(prefix="pytest-work-", dir=output) as scratch:
+        return measure(python, candidate, output, Path(scratch), suites)
+
+
+def measure(python, candidate, output, temp, suites):
     config = output / "coveragerc"
     config.write_text(COVERAGE_CONFIG, encoding="utf-8")
     data = output / ".coverage"
