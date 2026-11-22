@@ -10,7 +10,7 @@
 
 export const CARD_VERSION = "0.3.2";
 const PLATFORM = "nightscout_extended";
-const MGDL_PER_MMOL = 18.0182;
+const MGDL_PER_MMOL = 18.016;
 const DEFAULT_THRESHOLDS = { urgent_low: 55, low: 80, high: 180, urgent_high: 260 };
 
 // Sensor translation keys, matched within the same Nightscout device.
@@ -110,6 +110,27 @@ function num(state) {
 
 function isMmol(state) {
   return /mmol/i.test((state && state.attributes && state.attributes.unit_of_measurement) || "");
+}
+
+function canonicalMgdl(state) {
+  const value = num(state);
+  if (!Number.isFinite(value)) return NaN;
+  const native = state && state.attributes && state.attributes.native_mgdl;
+  if (Number.isFinite(native)) return native;
+  return value * (isMmol(state) ? MGDL_PER_MMOL : 1);
+}
+
+function displayGlucose(state, mmol) {
+  const mgdl = canonicalMgdl(state);
+  return Number.isFinite(mgdl) ? mgdl / (mmol ? MGDL_PER_MMOL : 1) : NaN;
+}
+
+function glucoseTimeMs(glucose, last) {
+  const source = glucose && glucose.attributes && glucose.attributes.source_time;
+  const sourceMs = source === undefined || source === null || source === ""
+    ? NaN : new Date(source).getTime();
+  if (Number.isFinite(sourceMs)) return sourceMs;
+  return last ? new Date(last.state).getTime() : NaN;
 }
 
 class NightscoutGlucoseCard extends HTMLElement {
@@ -347,9 +368,9 @@ class NightscoutGlucoseCard extends HTMLElement {
 
     const mmol = isMmol(g);
     const value = num(g);
-    const mgdl = value * (mmol ? MGDL_PER_MMOL : 1);
+    const mgdl = canonicalMgdl(g);
     const last = this._state("last");
-    const lastMs = last ? new Date(last.state).getTime() : NaN;
+    const lastMs = glucoseTimeMs(g, last);
     const ageMin = (Date.now() - lastMs) / 60000;
     const t = logic.thresholds(g.attributes && g.attributes.thresholds_mgdl);
     const level = logic.classify(mgdl, ageMin, cfg.stale_minutes, t);
@@ -370,7 +391,7 @@ class NightscoutGlucoseCard extends HTMLElement {
     el.value.textContent = Number.isFinite(value) ? (mmol ? value.toFixed(1) : String(Math.round(value))) : "---";
     const trend = this._state("trend");
     el.arrow.textContent = stale ? "" : ARROWS[trend ? trend.state : ""] || "";
-    el.delta.textContent = stale ? "" : logic.formatDelta(num(this._state("delta")), mmol);
+    el.delta.textContent = stale ? "" : logic.formatDelta(displayGlucose(this._state("delta"), mmol), mmol);
     const pct = Number.isFinite(ageMin) ? Math.max(0, Math.min(100, 100 - (ageMin / cfg.stale_minutes) * 100)) : 0;
     el.fill.style.width = `${pct}%`;
 
@@ -380,7 +401,7 @@ class NightscoutGlucoseCard extends HTMLElement {
       if (stale) parts.push("⚠ No recent reading");
       const iob = num(this._state("iob"));
       const cob = num(this._state("cob"));
-      const fc = num(this._state("forecast"));
+      const fc = displayGlucose(this._state("forecast"), mmol);
       if (Number.isFinite(iob)) parts.push(`IOB ${iob.toFixed(2)} U`);
       if (Number.isFinite(cob)) parts.push(`COB ${Math.round(cob)} g`);
       if (Number.isFinite(fc) && !stale) parts.push(`30 min ≈ ${mmol ? fc.toFixed(1) : Math.round(fc)}`);

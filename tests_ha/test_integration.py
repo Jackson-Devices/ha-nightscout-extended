@@ -19,12 +19,12 @@ PROPS = json.loads((Path(__file__).parent.parent / "tests" / "fixtures" / "prope
 STATUS = {"version": "15.0.9", "settings": {"units": "mg/dl", "customTitle": "Example NS"}}
 
 
-def _mock(aioclient_mock: AiohttpClientMocker, status=STATUS, ok=True):
+def _mock(aioclient_mock: AiohttpClientMocker, status=STATUS, ok=True, properties=PROPS):
     code = 200 if ok else 401
     aioclient_mock.get(f"{URL}/api/v1/status.json", json=status if ok else {}, status=code)
-    aioclient_mock.get(f"{URL}/api/v2/properties/bgnow", json=PROPS if ok else {}, status=code)
+    aioclient_mock.get(f"{URL}/api/v2/properties/bgnow", json=properties if ok else {}, status=code)
     aioclient_mock.get(
-        f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS if ok else {}, status=code
+        f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=properties if ok else {}, status=code
     )
     aioclient_mock.get(f"{URL}/api/v1/treatments.json", json=TREATMENTS if ok else [], status=code)
 
@@ -155,8 +155,8 @@ async def test_calendar_trigger_fires_before_planned_meal(hass: HomeAssistant, a
     assert calls[0].data["message"].startswith("Planned meal: Dinner")
 
 
-async def _setup(hass: HomeAssistant, aioclient_mock, status=STATUS):
-    _mock(aioclient_mock, status=status)
+async def _setup(hass: HomeAssistant, aioclient_mock, status=STATUS, properties=PROPS):
+    _mock(aioclient_mock, status=status, properties=properties)
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=URL, title="NS",
         data={CONF_URL: URL, CONF_API_KEY: "readable-abc", CONF_USE_API_SECRET: False},
@@ -184,6 +184,29 @@ async def test_glucose_thresholds_default_when_status_has_none(hass: HomeAssista
     assert hass.states.get("sensor.ns_glucose").attributes["thresholds_mgdl"] == {
         "urgent_low": 55.0, "low": 80.0, "high": 180.0, "urgent_high": 260.0
     }
+
+
+async def test_glucose_sensors_expose_canonical_mgdl_and_source_time(
+    hass: HomeAssistant, aioclient_mock
+):
+    properties = json.loads(json.dumps(PROPS))
+    properties["bgnow"]["mean"] = 180
+    properties["bgnow"]["last"] = 180
+    properties["bgnow"]["sgvs"][0]["mgdl"] = 180
+    properties["bgnow"]["sgvs"][0]["scaled"] = 180
+    properties["delta"]["absolute"] = 9.5
+    properties["delta"]["mgdl"] = 9.5
+    properties["delta"]["scaled"] = 9.5
+    properties["ar2"]["forecast"]["predicted"][-1]["mgdl"] = 180.5
+    properties["ar2"]["forecast"]["predicted"][-1]["scaled"] = 180.5
+
+    await _setup(hass, aioclient_mock, properties=properties)
+
+    glucose = hass.states.get("sensor.ns_glucose")
+    assert glucose.attributes["native_mgdl"] == 180
+    assert glucose.attributes["source_time"] == "2026-01-01T13:00:00+00:00"
+    assert hass.states.get("sensor.ns_glucose_change").attributes["native_mgdl"] == 9.5
+    assert hass.states.get("sensor.ns_forecast_in_30_minutes").attributes["native_mgdl"] == 180.5
 
 
 async def test_card_is_served_and_loaded_on_dashboards(hass: HomeAssistant, hass_client, aioclient_mock, monkeypatch):

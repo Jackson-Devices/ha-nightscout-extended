@@ -1,14 +1,95 @@
-// Unit tests for the glucose card's pure logic. Run: node --test tests_js
+// Unit tests for the glucose card's pure logic and rendered behavior. Run: node --test tests_js
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-// Just enough DOM for the module to load outside a browser.
+let CardClass;
+// Just enough DOM for the module to load and render outside a browser.
 globalThis.HTMLElement = class {};
-globalThis.customElements = { get: () => true, define() {} };
+globalThis.customElements = {
+  get: () => undefined,
+  define(_name, constructor) { CardClass = constructor; },
+};
 globalThis.window = globalThis;
+globalThis.document = { createElement: () => ({ textContent: "" }) };
 
 const { logic } = await import("../custom_components/nightscout_extended/www/nightscout-glucose-card.js");
 const T = { urgent_low: 55, low: 80, high: 180, urgent_high: 260 };
+
+function element() {
+  return {
+    attributes: {},
+    children: [],
+    hidden: false,
+    style: {
+      setProperty(name, value) { this[name] = value; },
+    },
+    textContent: "",
+    replaceChildren(...children) {
+      this.children = children;
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+  };
+}
+
+function sensor(state, unit, attributes = {}) {
+  return {
+    state: String(state),
+    attributes: { unit_of_measurement: unit, ...attributes },
+  };
+}
+
+function renderCard({ glucose, delta, forecast, last = "2026-01-01T11:30:00Z", now = "2026-01-01T12:05:00Z" }) {
+  const card = new CardClass();
+  card.setConfig({
+    show_chart: false,
+    show_footer: true,
+    show_clock: false,
+    night_mode: false,
+    stale_minutes: 15,
+  });
+  const names = ["card", "wrap", "chart", "clock", "name", "age", "value", "arrow",
+    "delta", "bar", "fill", "footer", "missing"];
+  const el = Object.fromEntries(names.map((name) => [name, element()]));
+  card._root = {};
+  card._el = el;
+  card._ids = {
+    glucose: "sensor.glucose",
+    delta: delta ? "sensor.delta" : undefined,
+    forecast: forecast ? "sensor.forecast" : undefined,
+    last: "sensor.last",
+  };
+  card._hass = {
+    states: {
+      "sensor.glucose": glucose,
+      "sensor.last": { state: last, attributes: {} },
+      ...(delta ? { "sensor.delta": delta } : {}),
+      ...(forecast ? { "sensor.forecast": forecast } : {}),
+    },
+  };
+
+  const realNow = Date.now;
+  Date.now = () => new Date(now).getTime();
+  try {
+    card._render();
+  } finally {
+    Date.now = realNow;
+  }
+  return el;
+}
+
+function glucose(state, unit, nativeMgdl, sourceTime = "2026-01-01T12:00:00Z") {
+  return sensor(state, unit, {
+    thresholds_mgdl: T,
+    native_mgdl: nativeMgdl,
+    source_time: sourceTime,
+  });
+}
+
+function footerText(el) {
+  return el.footer.children.map((child) => child.textContent);
+}
 
 test("classify uses Nightscout thresholds with inclusive target range", () => {
   assert.equal(logic.classify(54, 1, 15, T), "urgent_low");
@@ -21,10 +102,73 @@ test("classify uses Nightscout thresholds with inclusive target range", () => {
   assert.equal(logic.classify(261, 1, 15, T), "urgent_high");
 });
 
+test("rendered threshold band follows canonical mg/dL in both display units", () => {
+  const cases = [
+    { native: 180, mgdl: "180", mmol: "10.0", color: "#3d9a5b" },
+    { native: 180.1, mgdl: "180", mmol: "10.0", color: "#f2df74" },
+    { native: 260, mgdl: "260", mmol: "14.4", color: "#f2df74" },
+    { native: 260.1, mgdl: "260", mmol: "14.4", color: "#ef7a78" },
+  ];
+  for (const item of cases) {
+    for (const [unit, displayed] of [["mg/dL", item.mgdl], ["mmol/L", item.mmol]]) {
+      const el = renderCard({ glucose: glucose(displayed, unit, item.native) });
+      assert.equal(el.wrap.style["--ngc-bg"], item.color, unit + " at " + item.native + " mg/dL");
+    }
+  }
+});
+
 test("old, missing or non-numeric readings are stale", () => {
   assert.equal(logic.classify(120, 16, 15, T), "stale");
   assert.equal(logic.classify(NaN, 1, 15, T), "stale");
   assert.equal(logic.classify(120, NaN, 15, T), "stale");
+});
+
+test("unknown and unavailable states are not revived by canonical attributes", () => {
+  for (const state of ["unknown", "unavailable"]) {
+    const el = renderCard({ glucose: glucose(state, "mmol/L", 180) });
+    assert.equal(el.value.textContent, "---");
+    assert.equal(el.wrap.style["--ngc-bg"], "#5f6368");
+    assert.equal(el.delta.textContent, "");
+    assert.ok(footerText(el).includes("⚠ No recent reading"));
+  }
+});
+
+test("glucose source timestamp controls rendered age before lagging last-reading fallback", () => {
+  const el = renderCard({
+    glucose: glucose("180", "mg/dL", 180, "2026-01-01T12:01:00Z"),
+    last: "2026-01-01T11:30:00Z",
+    now: "2026-01-01T12:05:00Z",
+  });
+  assert.equal(el.age.textContent, "4 min ago");
+  assert.equal(el.wrap.style["--ngc-bg"], "#3d9a5b");
+});
+
+test("mixed-unit siblings render from canonical mg/dL in the primary display unit", () => {
+  const mgdl = renderCard({
+    glucose: glucose("180", "mg/dL", 180),
+    delta: sensor("0.5", "mmol/L", { native_mgdl: 9.5 }),
+    forecast: sensor("10.0", "mmol/L", { native_mgdl: 180.5 }),
+  });
+  assert.equal(mgdl.delta.textContent, "+10");
+  assert.ok(footerText(mgdl).includes("30 min ≈ 181"));
+
+  const mmol = renderCard({
+    glucose: glucose("10.0", "mmol/L", 180),
+    delta: sensor("9.5", "mg/dL", { native_mgdl: 9.5 }),
+    forecast: sensor("180.5", "mg/dL", { native_mgdl: 180.5 }),
+  });
+  assert.equal(mmol.delta.textContent, "+0.5");
+  assert.ok(footerText(mmol).includes("30 min ≈ 10.0"));
+});
+
+test("missing or malformed canonical sibling attributes fall back through each sibling unit", () => {
+  const el = renderCard({
+    glucose: glucose("180", "mg/dL", 180),
+    delta: sensor("1", "mmol/L"),
+    forecast: sensor("10", "mmol/L", { native_mgdl: "bad" }),
+  });
+  assert.equal(el.delta.textContent, "+18");
+  assert.ok(footerText(el).includes("30 min ≈ 180"));
 });
 
 test("night window wraps midnight and can be turned off", () => {

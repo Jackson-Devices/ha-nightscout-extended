@@ -14,14 +14,14 @@ integration only provides glucose. This one can run alongside it.
 
 | Sensor | Unit | Notes |
 |---|---|---|
-| Glucose | mg/dL or mmol/L | Follows your Nightscout's unit setting; attributes `direction`, `delta`, `thresholds_mgdl` (your site's alarm levels) |
-| Glucose change | mg/dL or mmol/L | Change since the previous reading |
+| Glucose | mg/dL or mmol/L | Follows your Nightscout's unit setting; attributes `direction`, `delta`, `thresholds_mgdl` (your site's alarm levels), canonical `native_mgdl`, and paired `source_time` |
+| Glucose change | mg/dL or mmol/L | Change since the previous reading; attribute `native_mgdl` holds the canonical integration value |
 | Glucose trend | – | Rising quickly … Falling quickly |
 | Last reading | timestamp | When the latest CGM value was taken |
 | Insulin on board | U | Nightscout `iob` plugin; attribute `source` (e.g. Care Portal, Loop, OpenAPS) |
 | Carbs on board | g | Nightscout `cob` plugin |
-| Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin |
-| Forecast in 30 minutes | mg/dL or mmol/L | Attribute `forecast` holds the whole predicted curve |
+| Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin; attribute `native_mgdl` holds the canonical integration value |
+| Forecast in 30 minutes | mg/dL or mmol/L | Attributes `native_mgdl` and `forecast` (the whole predicted curve) |
 | Last carbs | g | Most recent treatment with carbs; attributes `time`, `event_type`, `notes` |
 | Last insulin | U | Most recent treatment with insulin; same attributes |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
@@ -87,7 +87,11 @@ name: Sam
 - **IOB, COB and the 30-minute forecast** along the bottom.
 - mg/dL or mmol/L, following the sensor's unit.
 
-It finds the integration's sensors itself; set `entity` if you have more than one Nightscout site.
+It finds the integration's sensors itself; set `entity` if you have more than one Nightscout site. Threshold colours,
+the change and the 30-minute forecast use the sensors' canonical `native_mgdl` attributes, so each Home Assistant
+entity can select mg/dL or mmol/L independently. Older cached entities without those attributes fall back through
+each entity's own displayed unit. Recorder chart history also reconstructs older displayed states and can therefore
+have lower precision than current readings.
 
 | Option | Default | |
 |---|---|---|

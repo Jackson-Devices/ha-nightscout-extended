@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -211,12 +212,23 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
         attrs = (
-            self.entity_description.attrs_fn(self.coordinator.data)
+            self.entity_description.attrs_fn(data)
             if self.entity_description.attrs_fn
             else None
         )
+        if self.entity_description.glucose:
+            native_mgdl = self.entity_description.value_fn(data)
+            if (
+                isinstance(native_mgdl, (int, float))
+                and not isinstance(native_mgdl, bool)
+                and isfinite(native_mgdl)
+            ):
+                attrs = {**(attrs or {}), "native_mgdl": native_mgdl}
         if self.entity_description.key == "glucose":
             # For the bundled card: colour the reading by the site's own alarm levels.
             attrs = {**(attrs or {}), "thresholds_mgdl": self.coordinator.thresholds_mgdl}
+            if data.glucose_time is not None:
+                attrs["source_time"] = data.glucose_time.isoformat()
         return attrs
