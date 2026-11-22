@@ -406,10 +406,9 @@ def _apply_v3_glucose(
         data.glucose = data.glucose_time = data.delta = data.direction = None
         return
     when, glucose, direction = sample
-    if data.glucose_time != when or data.glucose is None or not math.isclose(data.glucose, glucose, abs_tol=0.05):
+    if data.glucose_time != when or data.glucose != glucose:
         data.delta = None
-        data.direction = direction
-    data.glucose, data.glucose_time = glucose, when
+    data.glucose, data.glucose_time, data.direction = glucose, when, direction
 
 
 class NightscoutClient:

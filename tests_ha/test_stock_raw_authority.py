@@ -61,3 +61,80 @@ async def test_successful_raw_owns_current_without_matching_bgnow(hass, aioclien
                 assert forecast.attributes["forecast_time"] == target
     finally:
         await _unload(hass, entry)
+
+
+@pytest.mark.parametrize("v3", [False, True], ids=["legacy", "v3"])
+@pytest.mark.parametrize(
+    "raw_glucose, v2_direction, raw_direction, expected_delta, expected_trend",
+    [
+        pytest.param(162.04, "Flat", "SingleDown", None, "single_down", id="same-time-different-value"),
+        pytest.param(162, "Flat", "SingleDown", 7, "single_down", id="same-reading-conflicting-direction"),
+        pytest.param(162, None, "FortyFiveUp", 7, "forty_five_up", id="same-reading-v2-omits-direction"),
+        pytest.param(162, "Flat", None, 7, STATE_UNKNOWN, id="same-reading-raw-omits-direction"),
+    ],
+)
+async def test_raw_metadata_requires_its_own_reading(
+    hass, aioclient_mock, freezer, v3, raw_glucose, v2_direction, raw_direction, expected_delta,
+    expected_trend,
+):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock, name="RawMetadata", v3=v3)
+    raw_time = "2026-01-08T12:07:00+00:00"
+    raw_stamp = site.put("raw-current", raw_time, raw_glucose, direction=raw_direction)
+    site.bgnow = {"last": 162, "mills": _ms(raw_time)}
+    site.calculations = {"delta": {"mgdl": 7}}
+    if v2_direction is not None:
+        site.calculations["direction"] = {"value": v2_direction}
+
+    entry = await _configure(hass, site)
+    try:
+        route = ENTRIES if v3 else LEGACY_ENTRIES
+        assert (route, [(_ms(raw_time), raw_glucose, raw_stamp)]) in site.raw_batches
+        _current(hass, entry, str(raw_glucose), raw_time)
+        reading = hass.states.get(_entity(hass, entry))
+        assert reading.attributes.get("delta") == expected_delta
+        assert reading.attributes.get("direction") == raw_direction
+        delta = hass.states.get(_entity(hass, entry, "glucose_delta"))
+        assert delta.state == (STATE_UNKNOWN if expected_delta is None else str(expected_delta))
+        assert hass.states.get(_entity(hass, entry, "glucose_trend")).state == expected_trend
+    finally:
+        await _unload(hass, entry)
+
+
+@pytest.mark.parametrize("v3", [False, True], ids=["legacy", "v3"])
+@pytest.mark.parametrize("direction, trend", [("TripleUp", "triple_up"), ("TripleDown", "triple_down")])
+async def test_raw_stock_triple_trend(hass, aioclient_mock, freezer, v3, direction, trend):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock, name="RawTrend", v3=v3)
+    raw_time = "2026-01-08T12:07:00+00:00"
+    site.put("raw-current", raw_time, 162, direction=direction)
+
+    entry = await _configure(hass, site)
+    try:
+        _current(hass, entry, "162", raw_time)
+        assert hass.states.get(_entity(hass, entry)).attributes["direction"] == direction
+        state = hass.states.get(_entity(hass, entry, "glucose_trend"))
+        assert state.state == trend
+        assert trend in state.attributes["options"]
+    finally:
+        await _unload(hass, entry)
+
+
+async def test_legacy_v2_fallback_keeps_its_own_metadata(hass, aioclient_mock, freezer):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock, name="LegacyMetadata", v3=False)
+    fallback_time = "2026-01-08T12:07:00+00:00"
+    site.bgnow = {"last": 162, "mills": _ms(fallback_time)}
+    site.calculations = {"delta": {"mgdl": 7}, "direction": {"value": "Flat"}}
+
+    entry = await _configure(hass, site)
+    try:
+        assert (LEGACY_ENTRIES, []) in site.raw_batches
+        _current(hass, entry, "162", fallback_time)
+        reading = hass.states.get(_entity(hass, entry))
+        assert reading.attributes["delta"] == 7
+        assert reading.attributes["direction"] == "Flat"
+        assert hass.states.get(_entity(hass, entry, "glucose_delta")).state == "7"
+        assert hass.states.get(_entity(hass, entry, "glucose_trend")).state == "flat"
+    finally:
+        await _unload(hass, entry)
