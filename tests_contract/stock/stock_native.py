@@ -31,7 +31,6 @@ PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,basal,ar2"
 UPLOADER = "stock-parity-pump"
 SGV_DEVICE = "stock-parity-cgm"
 QUANTITIES = ("carbs", "insulin", "duration", "rate", "absolute")
-V1_QUANTITY_SCHEMA = "lib/server/swagger.yaml#/components/schemas/Treatment"
 V1_COERCION = "lib/api/treatments/index.js:serveTreatments"
 
 
@@ -154,10 +153,80 @@ def query(path, params):
     return f"{path}?{urlencode(params)}" if params else path
 
 
-def get(port, path, headers, params=None):
-    status, body = request(port, query(path, params), headers=headers)
-    check(status == 200, f"native_get:{path}:http_{status}")
-    return body
+class ObservedGets:
+    """Validate successful stock reads before the fixture oracle looks at values."""
+
+    def __init__(self, port, gate, sources):
+        self.port = port
+        self.gate = gate
+        self.sources = sources
+        self.routes = {}
+
+    def fetch(self, path, headers, params=None):
+        status, body = request(self.port, query(path, params), headers=headers)
+        if status == 200:
+            self.observe(path, body)
+        return status, body
+
+    def get(self, path, headers, params=None):
+        status, body = self.fetch(path, headers, params)
+        check(status == 200, f"native_get:{path}:http_{status}")
+        return body
+
+    def observe(self, path, body):
+        # The v1/v2 status route can echo exchanged authorization when called
+        # with a query token. This runner uses only a header bearer or no auth.
+        if path in ("/api/v1/status.json", "/api/v2/status.json"):
+            check(not isinstance(body, dict) or body.get("authorized") is None,
+                  "stock_status_unexpected_authorization_payload")
+        api = path.split("/")[2]
+        route = path
+        if path.startswith("/api/v3/entries/history/"):
+            route = "/api/v3/entries/history/{lastModified}"
+        entry = self.routes.setdefault((api, route), {"observations": 0, "clean_observations": 0,
+                                                       "diagnostics": {}})
+        entry["observations"] += 1
+        try:
+            diagnostics = self.gate.validate(api, path, body, method="GET", status=200)
+            for diagnostic in diagnostics:
+                check(diagnostic["classification"] in ("schema-mismatch", "source-only", "unverified"),
+                      "unknown_swagger_diagnostic_classification")
+                key = canonical(diagnostic)
+                if key not in entry["diagnostics"]:
+                    entry["diagnostics"][key] = {"diagnostic": diagnostic, "occurrences": 0}
+                entry["diagnostics"][key]["occurrences"] += 1
+        except Exception as exc:
+            entry["failure"] = type(exc).__name__
+            raise StockError("stock_swagger_validation_error") from None
+        if not diagnostics:
+            entry["clean_observations"] += 1
+
+    def receipt(self):
+        classes = {"schema-mismatch": 0, "source-only": 0, "unverified": 0}
+        output = []
+        faults = False
+        for (api, route), entry in sorted(self.routes.items()):
+            findings = [entry["diagnostics"][key] for key in sorted(entry["diagnostics"])]
+            route_classes = {finding["diagnostic"]["classification"] for finding in findings}
+            for finding in findings:
+                classes[finding["diagnostic"]["classification"]] += finding["occurrences"]
+            view = {key: value for key, value in entry.items() if key != "diagnostics"}
+            faults |= "failure" in entry
+            if "failure" in entry or "unverified" in route_classes:
+                route_status = "harness_error"
+            elif "schema-mismatch" in route_classes:
+                route_status = "mismatch"
+            else:
+                route_status = "source-only" if "source-only" in route_classes else "pass"
+            output.append({"api": api, "method": "GET", "route": route, "http": 200,
+                           "result": route_status, **view, "diagnostics": findings})
+        if faults or classes["unverified"] or not output:
+            status = "harness_error"
+        elif classes["schema-mismatch"]:
+            status = "mismatch"
+        else:
+            status = "pass"
+        return {"status": status, "sources": self.sources, "diagnostic_counts": classes, "routes": output}
 
 
 def v3_result(body, path):
@@ -166,17 +235,17 @@ def v3_result(body, path):
     return body.get("result")
 
 
-def ready(port, reader, latest):
+def ready(wire, reader, latest):
     def ready_for_seed(value):
         if not isinstance(value, dict):
             return False
         now = value.get("bgnow", {})
         return isinstance(now, dict) and (now.get("last"), now.get("mills")) == (latest["sgv"], latest["date"])
 
-    return await_read(lambda: request(port, PROPERTIES, headers=reader), ready_for_seed, "stock seeded bgnow")
+    return await_read(lambda: wire.fetch(PROPERTIES, reader), ready_for_seed, "stock seeded bgnow")
 
 
-def permission_matrix(port, reader):
+def permission_matrix(port, reader, wire):
     checks = {}
     for domain in ("status", *COLLECTIONS):
         for action in ("read", "create", "update", "delete", "admin"):
@@ -193,8 +262,8 @@ def permission_matrix(port, reader):
             check(outcome["subject"] == outcome["anonymous"], f"permission_inequality:{right}")
             checks[right] = outcome
 
-    version = mapping(v3_result(get(port, "/api/v3/version", {}), "version"), "version")
-    status = mapping(v3_result(get(port, "/api/v3/status", reader), "status"), "status")
+    version = mapping(v3_result(wire.get("/api/v3/version", {}), "version"), "version")
+    status = mapping(v3_result(wire.get("/api/v3/status", reader), "status"), "status")
     for result in (version, status):
         check(result.get("version") == VERSION and str(result.get("apiVersion", "")).split(".")[0] == "3",
               "stock_v3_version")
@@ -289,7 +358,7 @@ def document_proof(rows, values, fields, envelope):
             "readback_sha256": digest({"values": values, "shape": shape})}
 
 
-def collection_reads(port, reader, fixture, anchor):
+def collection_reads(wire, reader, fixture, anchor):
     start = anchor - timedelta(days=6)
     end = utc(anchor)
     scope = {
@@ -298,10 +367,8 @@ def collection_reads(port, reader, fixture, anchor):
         "devicestatus": (read_device, ("_id", "identifier", "date", "created_at", "device", "pump", "loop")),
         "profile": (read_profile, ("_id", "identifier", "created_at", "startDate", "defaultProfile", "store")),
     }
-    reads = {}
-    quantities = []
+    pending = []
     for api in (1, 2, 3):
-        reads[str(api)] = {}
         for name, (normalize, fields) in scope.items():
             if api == 3:
                 endpoint = f"/api/v3/{name}"
@@ -322,44 +389,43 @@ def collection_reads(port, reader, fixture, anchor):
                     parameters.update({"find[date][$gte]": ms(start), "find[date][$lt]": ms(anchor)})
                 elif name != "profile":
                     parameters.update({"find[created_at][$gte]": utc(start), "find[created_at][$lt]": end})
-            payload = get(port, endpoint, reader, parameters)
-            envelope = "object:status,result" if api == 3 else "array"
-            rows = documents(v3_result(payload, endpoint) if api == 3 else payload, endpoint)
-            values = [normalize(row) for row in rows]
-            expected = fixture_data(fixture[name], normalize)
-            if name == "entries":
-                check(values == list(reversed(expected)), f"stock_ordered_sgv_disagreement:v{api}")
-            else:
-                check(sorted(values, key=lambda row: row["id"]) == expected, f"stock_seed_disagreement:{endpoint}")
-            if name == "treatments":
-                expected_by_id = {row["_id"]["$oid"]: row for row in fixture[name]}
-                for row in rows:
-                    ident = row_id(row)
-                    for field in QUANTITIES:
-                        expected_shape = (
-                            "number" if field in expected_by_id[ident]
-                            else "null" if api != 3 and field in ("carbs", "insulin")
-                            else "absent"
-                        )
-                        actual_shape = presence(row, field, numeric_type=True)
-                        check(actual_shape == expected_shape, f"stock_quantity_shape:{endpoint}:{field}")
-                        if actual_shape == "null":
-                            quantities.append({"route": endpoint, "id": ident, "field": field,
-                                               "wire": "null", "schema": "number (non-nullable if present)"})
-            proof = document_proof(rows, values, fields, envelope)
-            reads[str(api)][name] = {"route": endpoint, "query": parameters, "http": 200, **proof}
+            payload = wire.get(endpoint, reader, parameters)
+            pending.append((api, name, normalize, fields, endpoint, parameters, payload))
 
-    # The alias in api2/index.js mounts the v1 routes, including their GET coercion.
-    return reads, {
-        "status": "mismatch" if quantities else "pass",
-        "schema": V1_QUANTITY_SCHEMA, "native_behavior": V1_COERCION,
-        "v2_route_owner": "lib/api2/index.js:app.use('/', apiv1)",
-        "violations": quantities,
-    }
+    # Every searched collection reaches the official schema gate even if an
+    # incompatible raw type subsequently prevents the independent seed oracle.
+    reads = {"1": {}, "2": {}, "3": {}}
+    shape_differences = []
+    for api, name, normalize, fields, endpoint, parameters, payload in pending:
+        envelope = "object:status,result" if api == 3 else "array"
+        rows = documents(v3_result(payload, endpoint) if api == 3 else payload, endpoint)
+        values = [normalize(row) for row in rows]
+        expected = fixture_data(fixture[name], normalize)
+        if name == "entries":
+            check(values == list(reversed(expected)), f"stock_ordered_sgv_disagreement:v{api}")
+        else:
+            check(sorted(values, key=lambda row: row["id"]) == expected, f"stock_seed_disagreement:{endpoint}")
+        if name == "treatments":
+            expected_by_id = {row["_id"]["$oid"]: row for row in fixture[name]}
+            for row in rows:
+                ident = row_id(row)
+                for field in QUANTITIES:
+                    expected_shape = (
+                        "number" if field in expected_by_id[ident]
+                        else "null" if api != 3 and field in ("carbs", "insulin")
+                        else "absent"
+                    )
+                    actual_shape = presence(row, field, numeric_type=True)
+                    if actual_shape != expected_shape:
+                        shape_differences.append({"route": endpoint, "id": ident, "field": field,
+                                                  "expected": expected_shape, "actual": actual_shape})
+        proof = document_proof(rows, values, fields, envelope)
+        reads[str(api)][name] = {"route": endpoint, "query": parameters, "http": 200, **proof}
+    return reads, shape_differences
 
 
-def status_read(port, path, headers, latest):
-    payload = mapping(get(port, path, headers), path)
+def status_read(wire, path, headers, latest):
+    payload = mapping(wire.get(path, headers), path)
     check(payload.get("version") == VERSION and payload.get("status") == "ok"
           and payload.get("apiEnabled") is True, "stock_legacy_version_and_status")
     context = mapping(payload.get("settings"), "stock_settings")
@@ -382,8 +448,8 @@ def status_read(port, path, headers, latest):
             "values": values, "readback_sha256": digest(values)}
 
 
-def properties_read(port, headers, latest, previous, device):
-    props = mapping(get(port, PROPERTIES, headers), "v2_properties_object")
+def properties_read(wire, headers, latest, previous, device):
+    props = mapping(wire.get(PROPERTIES, headers), "v2_properties_object")
     bgnow = mapping(props.get("bgnow"), "stock_bgnow")
     current = {"last": numeric(bgnow.get("last"), "stock_current_sgv"),
                "mills": integer(bgnow.get("mills"), "stock_current_time"),
@@ -434,42 +500,44 @@ def properties_read(port, headers, latest, previous, device):
     }
 
 
-def fence(port, reader):
+def fence(wire, reader):
     path = "/api/v3/lastModified"
-    value = mapping(v3_result(get(port, path, reader), path), "lastmodified_object")
+    value = mapping(v3_result(wire.get(path, reader), path), "lastmodified_object")
     times = mapping(value.get("collections"), "lastmodified_collections")
     return {name: integer(times.get(name), f"lastmodified_{name}")
             for name in ("entries", "treatments", "devicestatus", "profile")}
 
 
-def snapshot(port, reader, fixture, anchor):
-    reads, schema = collection_reads(port, reader, fixture, anchor)
+def snapshot(wire, reader, fixture, anchor):
+    reads, shape_differences = collection_reads(wire, reader, fixture, anchor)
     recent = reads["3"]["entries"]["rows"]
     device = max(reads["3"]["devicestatus"]["rows"], key=lambda row: row["contact_at"])
     # Verify that anonymous legacy sees the same native data, in addition to the
     # individual permission checks, before giving either legacy profile no token.
     for collection in reads["1"].values():
-        rows = get(port, collection["route"], {}, collection["query"])
-        authenticated_rows = get(port, collection["route"], reader, collection["query"])
+        rows = wire.get(collection["route"], {}, collection["query"])
+        authenticated_rows = wire.get(collection["route"], reader, collection["query"])
         check(rows == authenticated_rows, "anonymous_legacy_collection_differs")
         collection["anonymous_matches"] = True
-    status = [status_read(port, f"/api/v{version}/status.json", reader, recent[0]) for version in (1, 2)]
-    anon_status = status_read(port, "/api/v1/status.json", {}, recent[0])
+    status = [status_read(wire, f"/api/v{version}/status.json", reader, recent[0]) for version in (1, 2)]
+    anon_status = status_read(wire, "/api/v1/status.json", {}, recent[0])
     check(all(item["values"] == anon_status["values"] for item in status), "legacy_native_status_disagreement")
     status[0]["anonymous_matches"] = True
-    props = properties_read(port, reader, recent[0], recent[1], device)
-    anon_props = properties_read(port, {}, recent[0], recent[1], device)
+    props = properties_read(wire, reader, recent[0], recent[1], device)
+    anon_props = properties_read(wire, {}, recent[0], recent[1], device)
     check(anon_props == props, "anonymous_legacy_properties_differ")
     props["anonymous_matches"] = True
     absent = {}
     for path in ("/api/v1/treatments.json", "/api/v2/treatments.json", "/api/v3/treatments"):
         key = "eventType" if path.startswith("/api/v3/") else "find[eventType]"
-        response = get(port, path, reader, {key: "Synthetic Missing Maintenance"})
+        response = wire.get(path, reader, {key: "Synthetic Missing Maintenance"})
         rows = v3_result(response, path) if path.startswith("/api/v3/") else response
         check(rows == [], "stock_absent_maintenance_control")
         absent[path] = {"event_type": "Synthetic Missing Maintenance", "rows": [], "http": 200}
     return {"collections": reads, "status": status, "properties": props,
-            "schema": schema, "storage_fence": fence(port, reader), "absence_controls": absent}
+            "treatment_wire_source": {"v1_get": V1_COERCION, "v2_alias": "lib/api2/index.js",
+                                      "fixture_shape_differences": shape_differences},
+            "storage_fence": fence(wire, reader), "absence_controls": absent}
 
 
 def stable_view(state):
@@ -509,14 +577,14 @@ def expected_for_ha(state, anchor):
     }
 
 
-def late_history(port, reader, admin, state, anchor):
+def late_history(port, wire, reader, admin, state, anchor):
     """Exercise the real read-only V3 history after the profile comparison."""
     cursor = state["storage_fence"]["entries"]
     route = "/api/v3/entries/history/<storage-ms>"
 
     def read(since):
         path = f"/api/v3/entries/history/{since}"
-        payload = get(port, path, reader, {"limit": 30})
+        payload = wire.get(path, reader, {"limit": 30})
         return documents(v3_result(payload, route), route)
 
     before = read(cursor)
@@ -538,7 +606,7 @@ def late_history(port, reader, admin, state, anchor):
               and late_date < cursor < modified, "stock_late_history_disagreement")
         check(read(modified) == [], "stock_history_advanced_empty")
         newest_route = "/api/v3/entries"
-        payload = get(port, newest_route, reader, {"type": "sgv", "sort$desc": "date", "limit": 5})
+        payload = wire.get(newest_route, reader, {"type": "sgv", "sort$desc": "date", "limit": 5})
         actual = [read_entry(row) for row in documents(v3_result(payload, newest_route), newest_route)]
         baseline = state["collections"]["3"]["entries"]["rows"]
         check(actual == sorted([*baseline, expected], key=lambda row: row["date"], reverse=True),

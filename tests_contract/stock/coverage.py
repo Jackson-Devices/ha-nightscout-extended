@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 
 LOCK = Path(__file__).resolve().parents[1] / "harness" / "versions.lock"
@@ -16,6 +17,7 @@ source =
     custom_components/nightscout_extended
 """
 COVERAGE_PACKAGES = {"coverage", "pytest-cov"}
+SUITE_PLUGIN = "tests_contract.stock.coverage_fixtures"
 INHERITED_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL")
 
 
@@ -27,6 +29,21 @@ def run(command, candidate, env, log):
         )
     if result.returncode:
         print(f"{log.stem} exited {result.returncode}. See {log}.", file=sys.stderr)
+    return result.returncode
+
+
+def run_suite(command, candidate, env, log, name):
+    # Pytest and integration output can include credential-bearing fixture values.
+    # The suite plugin writes only test identifiers and structured failure locations.
+    log.write_text(f"Starting {name} suite\n", encoding="utf-8")
+    result = subprocess.run(
+        command, cwd=candidate, env=env, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, check=False,
+    )
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(f"pytest exit: {result.returncode}\n")
+    if result.returncode:
+        print(f"{name} exited {result.returncode}. See {log}.", file=sys.stderr)
     return result.returncode
 
 
@@ -50,7 +67,7 @@ def collect(args):
     python = args.ha_python.absolute()
     output = args.output.resolve()
     suites = (
-        ("api", "tests", []),
+        ("api", "tests", ["-p", "no:homeassistant"]),
         ("ha", "tests_ha", ["-c", "tests_ha/pytest.ini"]),
     )
     for _, suite, _ in suites:
@@ -60,6 +77,8 @@ def collect(args):
         raise ValueError("Candidate has no Home Assistant pytest configuration")
     if not (candidate / "custom_components" / "nightscout_extended").is_dir():
         raise ValueError("Candidate has no Nightscout Extended integration")
+    if not (candidate / "tests_contract" / "stock" / "coverage_fixtures.py").is_file():
+        raise ValueError("Candidate has no coverage suite plugin")
     if not python.is_file():
         raise ValueError("Home Assistant Python executable does not exist")
     if output == candidate or candidate in output.parents:
@@ -68,8 +87,13 @@ def collect(args):
         raise ValueError("Output must be a new or empty directory")
 
     output.mkdir(parents=True, exist_ok=True)
-    temp = output / "tmp"
-    temp.mkdir()
+    # The writable HA configuration may contain credentials from test fixtures.
+    # Retain the reports, while the runner owns and removes the fixture subtree.
+    with TemporaryDirectory(prefix="pytest-work-", dir=output) as scratch:
+        return measure(python, candidate, output, Path(scratch), suites)
+
+
+def measure(python, candidate, output, temp, suites):
     config = output / "coveragerc"
     config.write_text(COVERAGE_CONFIG, encoding="utf-8")
     data = output / ".coverage"
@@ -92,14 +116,18 @@ def collect(args):
 
     statuses = []
     for name, suite, pytest_config in suites:
-        suite_env = {**env, "COVERAGE_FILE": str(data.with_suffix(f".{name}"))}
+        log = output / f"{name}.log"
+        suite_env = {
+            **env, "COVERAGE_FILE": str(data.with_suffix(f".{name}")),
+            "NSX_COVERAGE_SUITE": name, "NSX_COVERAGE_LOG": str(log),
+        }
         command = [
             python, "-B", "-m", "pytest", suite, *pytest_config,
-            "-q", "-p", "no:cacheprovider", "--tb=no", "--show-capture=no",
-            "--disable-warnings", f"--basetemp={temp / name}",
+            "-q", "-p", "no:cacheprovider", "-p", SUITE_PLUGIN,
+            f"--basetemp={temp / name}",
             f"--cov-config={config}", "--cov", "--cov-report=",
         ]
-        statuses.append(run(command, candidate, suite_env, output / f"{name}.log"))
+        statuses.append(run_suite(command, candidate, suite_env, log, name))
     if any(statuses):
         return 1
 
@@ -115,6 +143,9 @@ def collect(args):
     report = output / "term-missing.txt"
     if run([*coverage, "report", "--show-missing"],
            candidate, env, report):
+        return 1
+    if run([*coverage, "json", "-o", output / "coverage.json"],
+           candidate, env, output / "json.log"):
         return 1
     print(report.read_text(encoding="utf-8"), end="")
     return 0

@@ -7,6 +7,15 @@ python tests_contract/stock/run_stock.py --upstream PATH --candidate PATH \
 
 Output is a credential-free JSON file. Exit 0 means all gates passed, 1 means
 a schema or observed product mismatch, and 2 means a native or harness failure.
+
+Stage the exact schema validator wheels for the controller Python:
+python -m pip download --only-binary=:all: --require-hashes \
+    -r tests_contract/stock/swagger_gate.requirements.txt -d WHEELHOUSE
+python -m pip install --no-index --find-links WHEELHOUSE --only-binary=:all: \
+    --require-hashes -r tests_contract/stock/swagger_gate.requirements.txt
+
+The runner takes the pinned Swagger JSON bytes from the running stock image.
+Stage the locked Docker images beforehand for an offline run.
 """
 
 import argparse
@@ -63,17 +72,18 @@ class DisposableStock:
         ]
         self.started = False
 
-    def call(self, phase, *arguments, data=None, timeout=120):
+    def call(self, phase, *arguments, data=None, timeout=120, binary=False):
         command = [*self.command, *arguments]
         try:
             result = subprocess.run(
-                command, cwd=ROOT, env=self.env, input=data, encoding="utf-8", stdout=subprocess.PIPE,
+                command, cwd=ROOT, env=self.env, input=data, encoding=None if binary else "utf-8",
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, timeout=timeout, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise raw.StockError(f"{phase}:{type(exc).__name__}") from None
         raw.check(result.returncode == 0, f"{phase}:exit_{result.returncode}")
-        return result.stdout.strip()
+        return result.stdout if binary else result.stdout.strip()
 
     def start(self):
         self.call("compose_pull", "pull", "--policy", "missing", timeout=300)
@@ -98,6 +108,16 @@ class DisposableStock:
             self.call("compose_cleanup", "down", "--volumes", "--remove-orphans")
             return "pass"
         return "not_started"
+
+    def schemas(self, directory, sources):
+        paths = {}
+        for api, source in sources.items():
+            content = self.call(f"swagger_{api}_extract", "exec", "-T", "nightscout", "cat",
+                                f"/opt/app/{source['path']}", binary=True)
+            raw.check(hashlib.sha256(content).hexdigest() == source["sha256"], f"swagger_{api}_image_digest")
+            paths[api] = directory / f"{api}.json"
+            paths[api].write_bytes(content)
+        return paths
 
 
 def child_record(executable, product, mode, url, credential, expected, observed_at, prohibited):
@@ -139,46 +159,69 @@ def run(args, report):
     raw.check(args.upstream != args.candidate, "same_staged_product_root")
     report["provider"] = {"version": raw.VERSION, "upstream_commit": raw.SOURCE,
                           "images": lock["server"], "lock_sha256": lock_hash}
+    report["schema"] = {"status": "harness_error", "phase": "swagger_validator_dependency"}
+    from swagger_gate import SCHEMA_SOURCES, STOCK_COMMIT, SwaggerGate, SwaggerGateSetupError
+
+    raw.check(STOCK_COMMIT == raw.SOURCE and set(SCHEMA_SOURCES) == {"v1", "v3"}, "swagger_source_pin")
+    report["schema"] = {"status": "harness_error", "phase": "swagger_image_setup", "sources": SCHEMA_SOURCES}
     disposable = DisposableStock(lock)
     try:
         port, anchor, fixture = disposable.start()
         report["fixture"] = {"data_sha256": raw.digest(fixture), "observed_at": raw.utc(anchor),
                              "origin": "single 127.0.0.1 Compose binding", "seed_imports": list(fixture)}
-        credential, reader, _, _ = raw.native_subject(port, disposable.admin, name="stock-parity-reader")
-        raw.ready(port, reader, fixture["entries"][-1])
-        report["effective_permissions"] = raw.permission_matrix(port, reader)
-        before = report["native_before"] = raw.snapshot(port, reader, fixture, anchor)
-        expected = report["expected"] = raw.expected_for_ha(before, anchor)
-        origin = f"http://127.0.0.1:{port}"
-        secret_strings = (credential, reader["Authorization"], reader["Authorization"].split(" ", 1)[1],
-                          disposable.admin, disposable.env["H2_NIGHTSCOUT_SECRET"])
-        results = report["profiles"] = {}
-        for mode in PROFILES:
-            subject = credential if mode == "candidate_v3" else None
-            tree = args.upstream if mode == "upstream_legacy" else args.candidate
-            results[mode] = child_record(args.ha_python, tree, mode, origin, subject, expected,
-                                         raw.utc(anchor), secret_strings)
-        after = raw.snapshot(port, reader, fixture, anchor)
-        stable = raw.stable_view(before) == raw.stable_view(after)
-        report["native_stability"] = {
-            "status": "pass" if stable else "mismatch",
-            "before_sha256": raw.digest(raw.stable_view(before)), "after_sha256": raw.digest(raw.stable_view(after)),
-            "after_storage_fence": after["storage_fence"],
-        }
-        raw.check(stable, "stock_snapshot_changed_during_ha_profiles")
-        report["late_history"] = raw.late_history(port, reader, disposable.admin, after, anchor)
-        outcomes = {result["status"] for result in results.values()}
-        if "harness_error" in outcomes:
-            return "harness_error"
-        if "mismatch" in outcomes or before["schema"]["status"] != "pass":
-            return "mismatch"
-        return "pass"
+        with tempfile.TemporaryDirectory(prefix="stock-swagger-") as directory:
+            paths = disposable.schemas(Path(directory), SCHEMA_SOURCES)
+            try:
+                gate = SwaggerGate(paths["v1"], paths["v3"])
+            except SwaggerGateSetupError:
+                raise raw.StockError("swagger_validator_setup") from None
+            wire = raw.ObservedGets(port, gate, SCHEMA_SOURCES)
+            try:
+                status = read_and_compare(args, report, disposable, port, anchor, fixture, wire)
+            finally:
+                report["schema"] = wire.receipt()
+            if "harness_error" in (status, report["schema"]["status"]):
+                return "harness_error"
+            if "mismatch" in (status, report["schema"]["status"]):
+                return "mismatch"
+            return "pass"
     finally:
         try:
             report["cleanup"] = disposable.close()
         except raw.StockError as exc:
             report["cleanup"] = "harness_error"
             report["cleanup_phase"] = str(exc)
+
+
+def read_and_compare(args, report, disposable, port, anchor, fixture, wire):
+    credential, reader, _, _ = raw.native_subject(port, disposable.admin, name="stock-parity-reader")
+    raw.ready(wire, reader, fixture["entries"][-1])
+    report["effective_permissions"] = raw.permission_matrix(port, reader, wire)
+    before = report["native_before"] = raw.snapshot(wire, reader, fixture, anchor)
+    expected = report["expected"] = raw.expected_for_ha(before, anchor)
+    origin = f"http://127.0.0.1:{port}"
+    secret_strings = (credential, reader["Authorization"], reader["Authorization"].split(" ", 1)[1],
+                      disposable.admin, disposable.env["H2_NIGHTSCOUT_SECRET"])
+    results = report["profiles"] = {}
+    for mode in PROFILES:
+        subject = credential if mode == "candidate_v3" else None
+        tree = args.upstream if mode == "upstream_legacy" else args.candidate
+        results[mode] = child_record(args.ha_python, tree, mode, origin, subject, expected,
+                                     raw.utc(anchor), secret_strings)
+    after = raw.snapshot(wire, reader, fixture, anchor)
+    stable = raw.stable_view(before) == raw.stable_view(after)
+    report["native_stability"] = {
+        "status": "pass" if stable else "mismatch",
+        "before_sha256": raw.digest(raw.stable_view(before)), "after_sha256": raw.digest(raw.stable_view(after)),
+        "after_storage_fence": after["storage_fence"],
+    }
+    raw.check(stable, "stock_snapshot_changed_during_ha_profiles")
+    report["late_history"] = raw.late_history(port, wire, reader, disposable.admin, after, anchor)
+    outcomes = {result["status"] for result in results.values()}
+    if "harness_error" in outcomes:
+        return "harness_error"
+    native_shape_failed = bool(before["treatment_wire_source"]["fixture_shape_differences"])
+    return "mismatch" if native_shape_failed or "mismatch" in outcomes else "pass"
 
 
 def save(path, report):
