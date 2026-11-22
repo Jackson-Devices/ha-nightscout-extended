@@ -40,10 +40,12 @@ function sensor(state, unit, attributes = {}) {
   };
 }
 
-function renderCard({ glucose, delta, forecast, last = "2026-01-01T11:30:00Z", now = "2026-01-01T12:05:00Z" }) {
+function renderCard({
+  glucose, delta, forecast, showChart = false, last = "2026-01-01T11:30:00Z", now = "2026-01-01T12:05:00Z",
+}) {
   const card = new CardClass();
   card.setConfig({
-    show_chart: false,
+    show_chart: showChart,
     show_footer: true,
     show_clock: false,
     night_mode: false,
@@ -117,6 +119,55 @@ test("rendered threshold band follows canonical mg/dL in both display units", ()
   }
 });
 
+test("current reading uses Nightscout display limits on canonical mg/dL in both units", () => {
+  // Nightscout 15.0.6, lib/client/index.js#updateCurrentSGV: LOW for [39, 40), HIGH above 400.
+  const cases = [
+    { native: 38.999, mgdl: "39", mmol: "2.2", expected: ["39", "2.2"] },
+    { native: 39, mgdl: "39", mmol: "2.2", expected: ["LOW", "LOW"] },
+    { native: 39.999, mgdl: "40", mmol: "2.2", expected: ["LOW", "LOW"] },
+    { native: 40, mgdl: "40", mmol: "2.2", expected: ["40", "2.2"] },
+    { native: 400, mgdl: "400", mmol: "22.2", expected: ["400", "22.2"] },
+    { native: 400.001, mgdl: "400", mmol: "22.2", expected: ["HIGH", "HIGH"] },
+    { native: 401, mgdl: "401", mmol: "22.3", expected: ["HIGH", "HIGH"] },
+  ];
+  const actual = cases.map(({ native, mgdl, mmol }) => [
+    renderCard({ glucose: glucose(mgdl, "mg/dL", native) }).value.textContent,
+    renderCard({ glucose: glucose(mmol, "mmol/L", native) }).value.textContent,
+  ]);
+  assert.deepEqual(actual, cases.map(({ expected }) => expected));
+});
+
+test("current reading uses the same limits for older entities without canonical mg/dL", () => {
+  const cases = [
+    [39, "LOW", "LOW"],
+    [40, "40", "2.2"],
+    [400, "400", "22.2"],
+    [401, "HIGH", "HIGH"],
+  ];
+  const last = "2026-01-01T12:00:00Z";
+  const actual = cases.map(([mgdl]) => [
+    renderCard({ glucose: sensor(mgdl, "mg/dL"), last }).value.textContent,
+    renderCard({ glucose: sensor(mgdl / 18.016, "mmol/L"), last }).value.textContent,
+  ]);
+  assert.deepEqual(actual, cases.map(([, mgdl, mmol]) => [mgdl, mmol]));
+});
+
+test("display limits leave the chart's numeric reading and original timestamp intact", (t) => {
+  const drawChart = t.mock.method(CardClass.prototype, "_drawChart");
+  const sourceTime = "2026-01-01T12:01:00Z";
+  const low = renderCard({ glucose: glucose("39", "mg/dL", 39, sourceTime), showChart: true });
+  const high = renderCard({ glucose: glucose("22.3", "mmol/L", 401, sourceTime), showChart: true });
+  assert.deepEqual(drawChart.mock.calls.map(({ arguments: [, , current] }) => current), [
+    [Date.parse(sourceTime), 39],
+    [Date.parse(sourceTime), 401],
+  ]);
+  assert.match(low.chart.innerHTML, /<path d="M[\d.]+,400\.0"/);
+  assert.match(high.chart.innerHTML, /<path d="M[\d.]+,0\.0"/);
+  assert.deepEqual([low.value.textContent, high.value.textContent], ["LOW", "HIGH"]);
+  assert.match(low.wrap.attributes["aria-label"], /^Glucose LOW,/);
+  assert.match(high.wrap.attributes["aria-label"], /^Glucose HIGH,/);
+});
+
 test("old, missing or non-numeric readings are stale", () => {
   assert.equal(logic.classify(120, 16, 15, T), "stale");
   assert.equal(logic.classify(NaN, 1, 15, T), "stale");
@@ -124,8 +175,8 @@ test("old, missing or non-numeric readings are stale", () => {
 });
 
 test("unknown and unavailable states are not revived by canonical attributes", () => {
-  for (const state of ["unknown", "unavailable"]) {
-    const el = renderCard({ glucose: glucose(state, "mmol/L", 180) });
+  for (const [state, retained] of [["unknown", 39], ["unavailable", 401]]) {
+    const el = renderCard({ glucose: glucose(state, "mmol/L", retained) });
     assert.equal(el.value.textContent, "---");
     assert.equal(el.wrap.style["--ngc-bg"], "#5f6368");
     assert.equal(el.delta.textContent, "");

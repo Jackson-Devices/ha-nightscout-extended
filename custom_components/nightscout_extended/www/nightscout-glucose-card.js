@@ -375,13 +375,9 @@ class NightscoutGlucoseCard extends HTMLElement {
     const t = logic.thresholds(g.attributes && g.attributes.thresholds_mgdl);
     // Compare in the stored unit to avoid a floating-point round trip.
     const mmolFallback = mmol && Number.isFinite(mgdl) && !Number.isFinite(g.attributes?.native_mgdl);
-    const level = logic.classify(
-      mmolFallback ? value : mgdl,
-      ageMin,
-      cfg.stale_minutes,
-      t,
-      mmolFallback ? MGDL_PER_MMOL : 1,
-    );
+    const comparisonValue = mmolFallback ? value : mgdl;
+    const comparisonDivisor = mmolFallback ? MGDL_PER_MMOL : 1;
+    const level = logic.classify(comparisonValue, ageMin, cfg.stale_minutes, t, comparisonDivisor);
     const stale = level === "stale";
     const night = logic.isNight(new Date().getHours(), cfg);
     const c = logic.colors(level, night);
@@ -396,7 +392,16 @@ class NightscoutGlucoseCard extends HTMLElement {
       : "";
     el.name.textContent = cfg.name || "";
     el.age.textContent = logic.formatAge(ageMin);
-    el.value.textContent = Number.isFinite(value) ? (mmol ? value.toFixed(1) : String(Math.round(value))) : "---";
+
+    // Nightscout's current-reading labels are independent of the site's alarm thresholds.
+    let displayLimit;
+    if (comparisonValue >= 39 / comparisonDivisor && comparisonValue < 40 / comparisonDivisor) {
+      displayLimit = "LOW";
+    } else if (comparisonValue > 400 / comparisonDivisor) {
+      displayLimit = "HIGH";
+    }
+    el.value.textContent = displayLimit
+      ?? (Number.isFinite(value) ? (mmol ? value.toFixed(1) : String(Math.round(value))) : "---");
     const trend = this._state("trend");
     el.arrow.textContent = stale ? "" : ARROWS[trend ? trend.state : ""] || "";
     el.delta.textContent = stale ? "" : logic.formatDelta(displayGlucose(this._state("delta"), mmol), mmol);
@@ -416,10 +421,11 @@ class NightscoutGlucoseCard extends HTMLElement {
       el.footer.replaceChildren(...parts.map((p) => Object.assign(document.createElement("span"), { textContent: p })));
     }
 
+    const readingLabel = displayLimit ?? `${el.value.textContent} ${mmol ? "mmol/L" : "mg/dL"}`;
     el.wrap.setAttribute(
       "aria-label",
       stale ? `No recent glucose reading (${el.age.textContent})`
-        : `Glucose ${el.value.textContent} ${mmol ? "mmol/L" : "mg/dL"}, ${el.delta.textContent}, ${el.age.textContent}`
+        : `Glucose ${readingLabel}, ${el.delta.textContent}, ${el.age.textContent}`
     );
 
     el.chart.style.display = cfg.show_chart ? "" : "none";
