@@ -289,3 +289,41 @@ async def test_card_change_text_matches_nightscout(hass: HomeAssistant, stock, s
     assert card["delta"] == delta["display"], report([{
         "what": "change text", "site_units": settings["units"], "nightscout": delta["display"], "card": card["delta"],
     }])
+
+
+async def test_newest_entry_labelled_mmol_is_not_a_reading(hass: HomeAssistant, stock, seeded):
+    """Nightscout reads every entry as `mgdl: Number(sgv)` and ignores `units` (lib/data/dataloader.js).
+
+    A newest entry of `{sgv: 10, units: "mmol/L"}` is therefore a 10 mg/dL CGM error code, and bgnow reports no
+    current reading. The integration must show exactly what bgnow shows. This test runs last in the file because
+    it changes the server's current reading.
+    """
+    newest = int((datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp() * 1000)
+    stock.post("/api/v1/entries", [{
+        "type": "sgv", "sgv": 10, "units": "mmol/L", "date": newest, "direction": "Flat", "device": "parity",
+        "dateString": _iso(datetime.fromtimestamp(newest / 1000, timezone.utc)),
+    }])
+    deadline = time.monotonic() + 150
+    while time.monotonic() < deadline:
+        entries = stock.get("/api/v1/entries.json?count=1")
+        bgnow = stock.get("/api/v2/properties/bgnow").get("bgnow") or {}
+        if entries and entries[0].get("date") == newest and bgnow.get("mills") != seeded["readings"][-1]["date"]:
+            break
+        time.sleep(3)
+    else:
+        raise RuntimeError(f"Nightscout never processed the newest mmol-labelled entry: {bgnow}")
+
+    unit = _ha_unit(stock.get("/api/v1/status.json")["settings"]["units"])
+    to_unit = BloodGlucoseConcentrationConverter.converter_factory(MGDL, unit)
+    await _setup(hass, stock)
+    state = hass.states.get("sensor.parity_glucose").state
+    last = bgnow.get("last")
+    if last is None:
+        assert state in ("unknown", "unavailable"), report([{
+            "what": "newest mmol-labelled entry", "stock_bgnow": bgnow, "integration": state,
+            "note": "Nightscout shows no current reading here; the integration shows one",
+        }])
+    else:
+        assert float(state) == pytest.approx(to_unit(float(last))), report([{
+            "what": "newest mmol-labelled entry", "stock_bgnow_last": last, "integration": state,
+        }])
