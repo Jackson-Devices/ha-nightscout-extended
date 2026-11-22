@@ -1,0 +1,4 @@
+{
+  "_comment": "Divergences from stock Nightscout that the repository owner has approved in a PR comment (CONTRIBUTING.md, U-8). Each entry: id -> link to the approving comment. Anything not listed here fails the parity tests.",
+  "approved": {}
+}
