@@ -41,7 +41,7 @@ URL = "https://nightscout.example"
                 "bgLow": True, "bg_low": 65,
                 "bgTargetBottom": "malformed", "bg_target_bottom": 89,
                 "bgTargetTop": "Infinity", "bg_target_top": 171,
-                "bgHigh": 10**400, "bg_high": 244,
+                "bgHigh": "1e400", "bg_high": 244,
             }},
             {"urgent_low": 65, "low": 89, "high": 171, "urgent_high": 244},
             id="invalid-native-values-fall-back-to-documented",
