@@ -174,7 +174,7 @@ def _assert_original_time(row: dict, expected: dict, field: str) -> None:
     assert row["date"] == expected["date"] == millis(when)
 
 
-def test_same_seed_and_read_scope_agree_on_stock_measurements(stock_versions, stock_wire):
+def test_same_seed_and_read_scope_agree_on_stock_measurements(stock, stock_versions, stock_wire):
     _, _, _, docs, _ = stock_versions
     _, legacy_status, collections, empty_treatments, props = stock_wire
 
@@ -185,7 +185,9 @@ def test_same_seed_and_read_scope_agree_on_stock_measurements(stock_versions, st
     assert all(type(value) in (int, float) and value >= 30 for value in settings["thresholds"].values())
     assert type(settings["alarmTimeagoWarn"]) is bool
     assert type(settings["alarmTimeagoUrgent"]) is bool
-    assert all(type(settings[k]) in (int, float) for k in ("alarmTimeagoWarnMins", "alarmTimeagoUrgentMins"))
+    # stock.sh sets WARN_MINS in the environment for exactly one site.
+    assert settings["alarmTimeagoWarnMins"] == ("20" if stock.profile == "mgdl-custom" else 15)
+    assert settings["alarmTimeagoUrgentMins"] == 30
     assert empty_treatments == {1: [], 2: [], 3: []}
 
     for api in (1, 2, 3):

@@ -26,7 +26,10 @@ def _ref(name):
 def contract(tmp_path, monkeypatch):
     """Small excerpts with the same path/parameter/response binding shape as stock."""
     status = {"properties": {"settings": _ref("Settings")}}
-    settings = {"type": "object", "properties": {"timeFormat": {"type": "string"}}}
+    settings = {
+        "type": "object",
+        "properties": {"timeFormat": {"type": "string"}, "alarmTimeagoWarnMins": {"type": "number"}},
+    }
     treatment = {
         "type": "object",
         "properties": {
@@ -199,6 +202,16 @@ def test_legacy_route_alias_binds_operation_and_original_response_schema(contrac
         )
     with pytest.raises(ContractViolation, match=r"count"):
         check(gate, path, [row], params={**query, "count": "10leftovers"})
+
+
+def test_status_preserves_environment_override_for_timeago(contract):
+    gate, _ = contract
+    body = {"settings": {"alarmTimeagoWarnMins": "20"}}
+    with pytest.raises(PublishedResponseDifference, match=r"alarmTimeagoWarnMins.*type"):
+        check(gate, "/api/v1/status.json", body)
+    assert body["settings"]["alarmTimeagoWarnMins"] == "20"
+    body["settings"]["alarmTimeagoWarnMins"] = 15
+    assert check(gate, "/api/v1/status.json", body) == "swagger-v1"
 
 
 def test_status_requires_schema_fields_and_consumed_object(contract):

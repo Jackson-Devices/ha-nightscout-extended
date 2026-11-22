@@ -505,11 +505,12 @@ def _status_settings(body):
     settings = _object(_object(body, "v1 status").get("settings"), "v1 status.settings")
     for key in ("customTitle", "units"):
         _optional(settings, key, _string, "v1 status.settings")
+    # Minute settings can be numbers (defaults) or text (environment overrides).
+    # Preserve the status payload; stock timeago interprets the minutes later.
     for key in ("alarmTimeagoWarn", "alarmTimeagoUrgent"):
         _optional(
             settings, key, lambda value: type(value) is bool, "v1 status.settings"
         )
-        _optional(settings, key + "Mins", _is_number, "v1 status.settings")
     if "thresholds" in settings:
         thresholds = _object(settings["thresholds"], "v1 status.settings.thresholds")
         for key in ("bgLow", "bgTargetBottom", "bgTargetTop", "bgHigh"):
