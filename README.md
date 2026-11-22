@@ -91,7 +91,8 @@ It finds the integration's sensors itself; set `entity` if you have more than on
 the change and the 30-minute forecast use the sensors' canonical `native_mgdl` attributes, so each Home Assistant
 entity can select mg/dL or mmol/L independently. Older cached entities without those attributes fall back through
 each entity's own displayed unit. Recorder chart history also reconstructs older displayed states and can therefore
-have lower precision than current readings.
+have lower precision than current readings. If you change the glucose sensor's unit, points recorded before the switch can
+appear at the wrong scale until they leave the chart window.
 
 | Option | Default | |
 |---|---|---|

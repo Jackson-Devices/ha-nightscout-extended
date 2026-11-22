@@ -3,6 +3,15 @@
 Each version's section becomes its GitHub release notes, which Home Assistant shows in the update dialog.
 Add a section here before tagging a release.
 
+## [0.3.3] - 2026-11-22
+
+### Fixed
+- **Glucose card**: exact Nightscout thresholds show the correct colour in mg/dL and mmol/L, including for
+  older glucose entities without canonical values. Change and forecast now follow the card's glucose unit
+  even when their Home Assistant entities use a different unit.
+- Glucose, change and forecast sensors expose `native_mgdl` for the unrounded mg/dL value. The glucose
+  sensor also includes `source_time`, pairing the reading with its original timestamp.
+
 ## [0.3.2] - 2026-11-21
 
 ### Changed

@@ -8,7 +8,7 @@
  * at night, and draws recent readings plus the AR2 forecast behind the number.
  */
 
-export const CARD_VERSION = "0.3.2";
+export const CARD_VERSION = "0.3.3";
 const PLATFORM = "nightscout_extended";
 const MGDL_PER_MMOL = 18.016;
 const DEFAULT_THRESHOLDS = { urgent_low: 55, low: 80, high: 180, urgent_high: 260 };
@@ -61,12 +61,12 @@ const FORECAST_AHEAD_MIN = 30;
 
 /** Exposed for tests; pure functions with no DOM or hass access. */
 export const logic = {
-  classify(mgdl, ageMin, staleMin, t) {
-    if (!Number.isFinite(mgdl) || !Number.isFinite(ageMin) || ageMin > staleMin) return "stale";
-    if (mgdl < t.urgent_low) return "urgent_low";
-    if (mgdl < t.low) return "low";
-    if (mgdl <= t.high) return "in_range";
-    if (mgdl <= t.urgent_high) return "high";
+  classify(value, ageMin, staleMin, t, thresholdDivisor = 1) {
+    if (!Number.isFinite(value) || !Number.isFinite(ageMin) || ageMin > staleMin) return "stale";
+    if (value < t.urgent_low / thresholdDivisor) return "urgent_low";
+    if (value < t.low / thresholdDivisor) return "low";
+    if (value <= t.high / thresholdDivisor) return "in_range";
+    if (value <= t.urgent_high / thresholdDivisor) return "high";
     return "urgent_high";
   },
   isNight(hour, cfg) {
@@ -373,7 +373,15 @@ class NightscoutGlucoseCard extends HTMLElement {
     const lastMs = glucoseTimeMs(g, last);
     const ageMin = (Date.now() - lastMs) / 60000;
     const t = logic.thresholds(g.attributes && g.attributes.thresholds_mgdl);
-    const level = logic.classify(mgdl, ageMin, cfg.stale_minutes, t);
+    // Compare in the stored unit to avoid a floating-point round trip.
+    const mmolFallback = mmol && Number.isFinite(mgdl) && !Number.isFinite(g.attributes?.native_mgdl);
+    const level = logic.classify(
+      mmolFallback ? value : mgdl,
+      ageMin,
+      cfg.stale_minutes,
+      t,
+      mmolFallback ? MGDL_PER_MMOL : 1,
+    );
     const stale = level === "stale";
     const night = logic.isNight(new Date().getHours(), cfg);
     const c = logic.colors(level, night);

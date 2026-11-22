@@ -156,6 +156,26 @@ test("cached primary mmol glucose and invalid source time use entity fallbacks",
   assert.equal(el.age.textContent, "3 min ago");
 });
 
+test("mmol/L fallback preserves threshold equality and nearby fractional readings", () => {
+  const thresholds_mgdl = { urgent_low: 48, low: 96, high: 183, urgent_high: 208 };
+  const cases = [
+    [48, "#e8615a"],       // low at the urgent low threshold
+    [96, "#3d9a5b"],       // in range at the low threshold
+    [183, "#3d9a5b"],      // in range at the high threshold
+    [208, "#f2df74"],      // high at the urgent high threshold
+    [95.9999, "#e8615a"],  // low even though display rounding hides the difference
+    [183.0001, "#f2df74"], // high even though display rounding hides the difference
+  ];
+  const actual = cases.map(([mgdl]) => {
+    const el = renderCard({
+      glucose: sensor(mgdl / (180.16 / 10), "mmol/L", { thresholds_mgdl }),
+      last: "2026-01-01T12:00:00Z",
+    });
+    return [mgdl, el.wrap.style["--ngc-bg"]];
+  });
+  assert.deepEqual(actual, cases);
+});
+
 test("mixed-unit siblings render from canonical mg/dL in the primary display unit", () => {
   const mgdl = renderCard({
     glucose: glucose("180", "mg/dL", 180),
