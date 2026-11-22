@@ -16,15 +16,15 @@ integration only provides glucose. This one can run alongside it.
 | Sensor | Unit | Notes |
 |---|---|---|
 | Glucose | mg/dL or mmol/L | Follows your Nightscout's unit setting; attributes `direction`, `delta`, `thresholds_mgdl` (your site's alarm levels) |
-| Glucose change | mg/dL or mmol/L | Change since the previous reading |
+| Glucose change | mg/dL or mmol/L | Nightscout's calculated change when it matches the displayed reading |
 | Glucose trend | – | Rising quickly … Falling quickly |
 | Last reading | timestamp | When the latest CGM value was taken |
 | Insulin on board | U | Nightscout `iob` plugin; attribute `source` (e.g. Care Portal, Loop, OpenAPS) |
 | Carbs on board | g | Nightscout `cob` plugin |
 | Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin with `source_time` and `forecast_time` |
 | Forecast in 30 minutes | mg/dL or mmol/L | Same timestamps, plus the predicted curve in `forecast` |
-| Last carbs | g | Most recent treatment with carbs; attributes `time`, `event_type`, `notes` |
-| Last insulin | U | Most recent treatment with insulin; same attributes |
+| Last carbs | g | Most recent nonzero carb intake at or before the current time. Attributes include `time`, `event_type` and `notes`. |
+| Last insulin | U | Most recent nonzero insulin intake at or before the current time, with the same attributes. |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
 | Insulin age | h | Hours since the latest nonfuture `Insulin Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the change. |
 | Cannula age | h | Hours since the latest nonfuture `Site Change` in the site's retained treatments. Attributes `source_time` (UTC) and `event_type` identify the site change. |
@@ -61,6 +61,11 @@ treatments calendar continue to use their own reads.
 `calendar.<site>_treatments` shows every Nightscout treatment as an event: meals, boluses, notes, temporary
 targets, and anything logged for a **future** time. The summary reads like `Meal Bolus: 30 g carbs`,
 `Correction Bolus: 0.5 U insulin`, or the first line of a note. The full note is in the event description.
+
+Home Assistant uses a positive treatment duration from Nightscout when available. Momentary events and events with
+no usable duration get a five-minute display interval. The calendar widens its read by the longest applicable
+duration to include overlapping events that started before the requested range. If a range read fails or reaches
+the legacy result cap, it uses the treatments from the last successful poll.
 
 ### Example: an alarm before a planned meal
 
@@ -157,41 +162,65 @@ longer to sync. The update interval controls when Home Assistant checks for data
 
 Home Assistant reads Nightscout independently of the API used by your uploader. A site receiving v3 uploads can still serve this integration over v1 and v2. The integration selects its read path automatically and uses the same Home Assistant entities and display settings in either mode.
 
+The stock reference is [Nightscout 15.0.6][stock-release], with its [v1 Swagger schema][stock-v1],
+[v3 Swagger schema][stock-v3] and native server code. The table describes the intended Home Assistant behavior.
+The [source-linked QA matrix at its fixed revision][stock-qa-matrix] lists the cases and evidence requirements
+for both the stock wire and Home Assistant. See [QA pull request #2][stock-qa-pr] for the verification work.
+
 - **Public or legacy site:** enter a URL such as `https://public.example`. Leave the credential empty for public reads, or enter the site's existing read token or API secret for authenticated legacy reads.
 - **v3-capable site:** enter a URL such as `https://nightscout.example` and the site's readable subject token. After the legacy read check, the integration requests the public `/api/v3/version` and checks for a `3.x` API response, then exchanges the subject token for a bearer via `/api/v2/authorization/request/{subject-token}`. A missing capability route or a rejected subject exchange with HTTP 401 keeps already validated legacy reads. A malformed version or an unexpected API major raises an error. Protected collection requests use the bearer on the configured site. The client attempts one renewal after a protected HTTP 401 and reports persistent failures.
 
 | Home Assistant behavior | Legacy reads | Reads with v3 enabled | Compatibility check |
 |---|---|---|---|
 | Setup, reauthentication, site title, units and alarm thresholds | `/api/v1/status.json` and `/api/v2/properties/bgnow` to validate access | Same site metadata and access validation, plus the v3 version check and token exchange | [Setup and identity][v3-check-setup], [renewal and denied reads][v3-check-auth] |
-| Glucose and last reading | The v2 properties poll's `bgnow` value and time when available | Newest usable measurement and its original time from locally retained v3 readings | [Glucose selection and units][v3-check-glucose] |
+| Glucose and last reading | Newest eligible readable raw SGV from `/api/v1/entries.json`. A denied raw read can fall back to `bgnow` when the v2 measurement is readable. | Newest eligible readable raw SGV from `/api/v3/entries`, with its original measurement time | [Glucose selection and fallback][stock-qa-matrix] |
 | Ordered glucose history | Bounded `/api/v1/entries.json` reads add or update readings in the retained window | Bounded `/api/v3/entries` reads plus changes from `/api/v3/entries/history/<cursor>` | [History action tests](tests_ha/test_sgv_ingestion.py) |
-| Glucose change and trend | v2 `delta` and `direction` properties | Keep the v2 change and trend when its glucose value and timestamp agree with the v3 reading. Otherwise use the v3 reading's direction if present and leave the change unknown. | [Delta with delayed readings][v3-check-glucose], [Client parity tests](tests/test_api.py) |
+| Glucose change and trend | Use the v2 calculation when its glucose value and timestamp match the selected reading. For an unmatched raw reading, use its own direction when present and leave change unknown. | Same matching rule for v3 raw readings | [Delta with delayed readings][stock-qa-matrix] |
 | Insulin on board, carbs on board, and current basal | v2 `iob`, `cob`, and `basal` properties | Same computed values and available source attributes | [Calculated properties and settings][v3-check-derived] |
-| 15- and 30-minute AR2 forecasts, and chart points | v2 `ar2.forecast.predicted`, timed from the v2 `bgnow` reading | Same forecast, using its v2 reading time even when the v3 glucose clock differs | [Home Assistant forecast baseline][v3-check-ha-forecast], [synthetic forecast comparison][v3-check-forecast] |
-| Last carbs, last insulin and treatments calendar | `/api/v1/treatments.json` filtered by `created_at` | `/api/v3/treatments` combines bounded pages for `date` and `created_at` to include older records | [Legacy treatments, paging, and calendar boundaries][v3-check-treatments] |
+| 15- and 30-minute AR2 forecasts, and chart points | v2 `ar2.forecast.predicted`, anchored to `bgnow.mills` | Same v2 forecast and source time, even when the latest raw reading is newer | [Forecast selection and expiry][stock-qa-matrix] |
+| Last carbs, last insulin and treatments calendar | `/api/v1/treatments.json` filtered by `created_at` | `/api/v3/treatments` combines bounded pages for `date` and `created_at` to include older records | [Treatment wire and calendar ranges][stock-qa-matrix] |
 | Dashboard card and diagnostics | Home Assistant entities and `get_glucose_history` for the card, v1 site status and value presence for diagnostics | Same action, entities, and site settings | [Home Assistant integration tests][v3-check-setup] |
 
 A v3 glucose reading ahead of Home Assistant's clock is shown only if it is less than 60 seconds ahead and has the same timestamp and glucose value as Nightscout's current v2 `bgnow` reading. Its original timestamp is preserved.
 
-The v2 poll reads `/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal` in both modes. Treatment reads preserve the five-minute calendar duration when a treatment has no duration and use the most recent nonzero past treatment for each intake sensor. Calendar range requests check the site's longest applicable numeric treatment duration so they can include events that started before the displayed range. If a range read fails or reaches the legacy result cap, the calendar uses the last successful poll's treatments. The compatibility checks in the table link to the test cases and baseline controls.
+Both modes fetch site units and alarm settings via [v1 status (`/api/v1/status.json`)][stock-status] and
+Nightscout's calculations via [v2 properties (`/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal`)][stock-properties].
 
-The v3 treatment reader accepts carbs, insulin and duration as finite JSON numbers. If a quantity is malformed, the event and its other fields remain available. V1 continues to accept numeric strings for these fields.
+The v1 treatment schema declares numeric carbs and insulin. The v3 schema also declares numeric duration in
+minutes. In the stock 15.0.6 check, v1 and its v2 treatment alias returned JSON `null` for quantities omitted
+from the stored treatments, contrary to their declared number type. V3 omitted those fields. Explicit numeric
+zero survived on all three routes. The v1 GET handler converts carbs and insulin to numbers before JSON
+serialization, so the MongoDB representation can differ from the v1 and v2 wire values. [Stock v1 treatment serializer][stock-treatment-wire]
+
+Home Assistant's treatment reader preserves finite JSON numbers, including explicit zero, for carbs, insulin and
+duration on both read paths. Missing fields, `null` and malformed values such as numeric strings leave that
+quantity unset. The event and its other valid fields remain available. The intake sensors select the latest
+nonzero value at or before the current time using the treatment's event time.
 
 [v3-check-setup]: https://github.com/aperetti/ha-nightscout-extended/blob/a8acabe41d6380f6647f9863c37bc9d776ffc9cc/tests_ha/test_integration.py#L32-L104
 [v3-check-auth]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L244-L266
-[v3-check-glucose]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L267-L285
 [v3-check-derived]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L286-L292
-[v3-check-ha-forecast]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/adapter/test_forecast_compatibility.py
-[v3-check-forecast]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L293-L306
-[v3-check-treatments]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/a34f68f78a950330441c594869b4226971a37080/tests_contract/contract/cases.json#L307-L318
+[stock-qa-pr]: https://github.com/Jackson-Devices/ha-nightscout-extended/pull/2
+[stock-qa-matrix]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/0817305cc69733cbffe4e23f9e995b7e84c4fc19/docs/nightscout-stock-parity.md
+[stock-release]: https://github.com/nightscout/cgm-remote-monitor/commit/9cd304f78a5c12401c9711cbd56d2a12eaca0632
+[stock-v1]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/server/swagger.yaml
+[stock-v3]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api3/swagger.yaml
+[stock-status]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api/status.js
+[stock-properties]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api2/properties.js
+[stock-treatment-wire]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api/treatments/index.js#L23-L80
+[stock-ar2]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/ar2.js
+[stock-timeago]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/timeago.js#L66-L112
+[stock-settings]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/settings.js#L13-L45
+[stock-history]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api3/generic/history/operation.js
 
 ## Glucose history
 
-A poll may find zero, one, or many new or revised readings. A quiet poll leaves existing readings and their
-timestamps unchanged. The v3 server's write timestamp tracks which changes Home Assistant has read, including
-late uploads with older measurement times. Repeated reads use the site's stable record ID to avoid duplicates,
-and distinct IDs can share a timestamp. Late readings fill the chart at their original times while the current
-glucose sensor continues to show the latest usable reading.
+A poll may find zero, one, or many new or revised readings. The source measurement time (`date`) belongs to
+the sample and is what `last_reading` and history use. The v3 server's modification clock (`srvModified`) tracks
+changes, including late uploads with older measurement times. Home Assistant observes these changes on its own
+polling schedule. A late reading can fill the chart at its original time without advancing current glucose.
+Quiet polls preserve existing samples and timestamps. Repeated reads use stable record IDs to avoid duplicates,
+and distinct IDs can share a timestamp. [Native v3 history handler][stock-history]
 
 The bundled card uses the history action and shows gaps where coverage is missing or measurements are far
 apart. Backfilled readings appear in this chart and in history action results. Home Assistant Recorder and
@@ -227,16 +256,28 @@ Nightscout makes available.
 
 ## Forecasts and missing values
 
-Both horizons use Nightscout's AR2 forecast, anchored to its v2 `bgnow` reading even when the latest v3
-reading has a different time. `source_time` is the anchor time and `forecast_time` is the selected point's
-time. Both are UTC timestamps when known. Each horizon is `unknown` independently if there is no usable
-point within three minutes of its target. A missing optional calculation can leave its sensor `unknown`
-while other data stays available. A failed data request can make its affected sensors `unavailable`, and
-a site-wide outage makes the loaded sensors `unavailable` until polling succeeds again.
+Home Assistant applies the earliest enabled Nightscout TimeAgo warning or urgent threshold to current glucose,
+change and trend, using the selected reading's measurement time. Nightscout defaults to 15 minutes for
+warning and 30 minutes for urgent. A reading remains fresh at the threshold and ages out once its age exceeds
+it. With both settings disabled, there is no source-age limit. A local timer can mark a reading stale between
+network polls. `last_reading` and stored glucose history keep their original measurement times.
+[Nightscout settings defaults][stock-settings], [native TimeAgo][stock-timeago]
 
-A repeated older reading or curve keeps its original timestamps. The card omits expired forecast points
-and hides stale forecasts using `stale_minutes`. The forecast sensors use the site's display unit, and
-the chart attribute's `mgdl` values stay in mg/dL.
+The two forecasts use the native AR2 curve from v2, anchored to `bgnow.mills` even when raw glucose is newer.
+For each nominal horizon, Home Assistant selects the nearest usable point within three minutes of the anchor
+plus 15 or 30 minutes. `source_time` is the v2 anchor and `forecast_time` is the selected point's actual time.
+Both attributes use UTC, and a missing point has no target time. [Native AR2 plugin][stock-ar2]
+
+Each forecast value becomes `unknown` when its own actual target time is reached or its v2 source exceeds
+the enabled source-age limit. A disabled source-age limit leaves target expiry in effect. On expiry, Home
+Assistant retains the two timestamps and the curve for charting. Repeated data keeps its original times,
+so a poll cannot extend an expired forecast. The card omits expired points and uses its own `stale_minutes`
+setting to hide stale curves. Forecast sensors use the site's display unit and the curve's `mgdl` values stay
+in mg/dL.
+
+A responding data source with no usable, current value leaves the affected sensor `unknown`. A failed request
+can make its affected sensors `unavailable` while independent signals continue to update. A site-wide outage
+makes the loaded sensors `unavailable` until polling succeeds again.
 
 ### Example: forecast chart
 
