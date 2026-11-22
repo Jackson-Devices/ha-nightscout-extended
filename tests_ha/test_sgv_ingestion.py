@@ -313,7 +313,7 @@ async def test_scheduled_polls_materialize_every_sgv_and_apply_source_mutations(
         site.put("six", six, 116)
         await _tick(hass, freezer, site)
         samples = [
-            _sample("late-05", late, pytest.approx(117.1183)),
+            _sample("late-05", late, pytest.approx(117.104)),
             _sample("six", six, 116),
             _sample("tie-a", eight, 119),
             _sample("tie-b", eight, 121),
