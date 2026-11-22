@@ -1,0 +1,56 @@
+name: Parity
+
+# Runs the integration against a real, pinned stock Nightscout and fails on any difference from it
+# (CONTRIBUTING.md: the acceptance rule and U-4). Deliberately no path filters and no draft skips: every push and
+# every pull request gets a result. Make the "Parity / stock (...)" checks required in a branch ruleset.
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: parity-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stock:
+    name: stock (${{ matrix.site }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        site: [mgdl-default, mgdl-custom, mmol-custom]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          prune-cache: true
+
+      - name: Start stock Nightscout (${{ matrix.site }})
+        run: tests_parity/stock.sh start "${{ matrix.site }}"
+
+      - name: Parity tests
+        run: >-
+          uv run --python 3.14 --with-requirements tests_ha/requirements.txt
+          pytest tests_parity -c tests_parity/pytest.ini -p no:cacheprovider -v
+
+      - name: Stock server log
+        if: failure()
+        run: docker logs parity-ns 2>&1 | tail -200
+
+      - name: Stop stock Nightscout
+        if: always()
+        run: tests_parity/stock.sh stop

@@ -15,6 +15,7 @@ import subprocess
 import urllib.request
 
 import pytest
+import pytest_socket
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 
@@ -31,6 +32,13 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
 
+@pytest.fixture(autouse=True)
+def allow_local_stock_server(socket_enabled):
+    """Home Assistant's test plugin blocks sockets. Allow them; connections stay limited to 127.0.0.1."""
+    pytest_socket.socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
+    yield
+
+
 class Stock:
     """Access to the running stock server, its database and its source files."""
 
@@ -41,6 +49,9 @@ class Stock:
         self.secret = secret_file.read_text()
         self.secret_sha1 = hashlib.sha1(self.secret.encode()).hexdigest()
         self.profile = (STATE_DIR / "profile").read_text()
+        # Session fixtures are created before the per-test socket fixture runs.
+        pytest_socket.enable_socket()
+        pytest_socket.socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
 
     # ---- HTTP -------------------------------------------------------------
 
@@ -113,7 +124,13 @@ def approved_exceptions() -> dict[str, str]:
     return json.loads((HERE / "exceptions.json").read_text())["approved"]
 
 
-def report(mismatches: list, limit: int = 15) -> str:
-    lines = [f"{len(mismatches)} mismatch(es) with stock Nightscout. First {min(limit, len(mismatches))}:"]
-    lines += [f"  {json.dumps(m, default=str)}" for m in mismatches[:limit]]
+def report(mismatches: list, limit: int = 8) -> str:
+    """Summarise mismatches by kind, with up to `limit` examples of each kind."""
+    groups: dict[str, list] = {}
+    for item in mismatches:
+        groups.setdefault(str(item.get("what", item.get("field", "mismatch"))), []).append(item)
+    lines = [f"{len(mismatches)} mismatch(es) with stock Nightscout, in {len(groups)} kind(s):"]
+    for kind, items in groups.items():
+        lines.append(f"- {kind}: {len(items)}")
+        lines += [f"    {json.dumps(item, default=str, ensure_ascii=False)}" for item in items[:limit]]
     return "\n".join(lines)
