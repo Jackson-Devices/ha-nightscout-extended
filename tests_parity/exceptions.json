@@ -1,4 +1,12 @@
 {
-  "_comment": "Divergences from stock Nightscout that the repository owner has approved in a PR comment (CONTRIBUTING.md, U-8). Each entry: id -> link to the approving comment. Anything not listed here fails the parity tests.",
-  "approved": {}
+  "_comment": "Divergences from stock Nightscout that the repository owner has approved in a PR comment (CONTRIBUTING.md, U-8). 'approved' entries relax the default-configuration parity checks; anything not listed there fails them. 'approved_opt_in' entries are allowed only behind a non-default option and never relax a default-configuration check.",
+  "approved": {},
+  "approved_opt_in": {
+    "E-1b": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7086580376",
+    "E-1c": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7086580376"
+  },
+  "rejected": {
+    "E-4a": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/4#issuecomment-7086577773",
+    "E-5a": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/5#issuecomment-7086150826"
+  }
 }
