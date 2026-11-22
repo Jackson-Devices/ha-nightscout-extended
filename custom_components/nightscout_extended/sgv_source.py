@@ -9,13 +9,12 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .api import (
-    MMOL_PER_MGDL,
     NightscoutClient,
     NightscoutConnectionError,
     _V3_ENTRIES,
     _V3_PAGE_SIZE,
     _V3PageLimitError,
-    _num,
+    _sgv_mgdl,
     _source_id,
     _text,
     _v3_result,
@@ -62,11 +61,8 @@ def _reading(
     date = _millis(row.get("date"))
     if date is None or not _MIN_MEASUREMENT_MS <= date <= _MAX_MEASUREMENT_MS:
         return None
-    value = _num(row.get("sgv"))
-    units = _text(row.get("units"))
-    if value is not None and units and units.lower() in ("mmol", "mmol/l"):
-        value /= MMOL_PER_MGDL
-    if value is None or not math.isfinite(value):
+    value = _sgv_mgdl(row)
+    if value is None:
         return None
     return {
         "id": key,

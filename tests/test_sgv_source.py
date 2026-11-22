@@ -207,7 +207,7 @@ def test_v3_range_splits_an_unordered_full_prefix_and_reads_dense_ties(monkeypat
     readings = asyncio.run(source.read_range(BASE, BASE + 21))
     assert [row["id"] for row in readings] == ["legacy", "a", "b", "c", "last"]
     assert readings[0]["date"] == BASE and readings[0]["modified"] is None
-    assert readings[1]["sgv"] == pytest.approx(5.5 * 18.0182)
+    assert readings[1]["sgv"] == 99.088
     assert readings[1]["direction"] == "Flat" and readings[2]["modified"] == BASE + 50
     successful = [query for _, query in client.calls if int(query["limit"]) == client.cap]
     assert successful[0]["date$lt"] == str(BASE + 21)
@@ -359,6 +359,41 @@ def test_v3_range_skips_invalid_amounts_and_fractional_times():
     assert [(row["id"], row["sgv"]) for row in readings] == [
         ("valid-a", 101.0), ("valid-b", 104.0),
     ]
+
+
+@pytest.mark.parametrize("v3", [False, True])
+def test_read_range_canonicalizes_only_explicit_mmol_sgv(v3):
+    client = _Client(v3=v3)
+    client.snapshot = [
+        _entry("explicit", BASE, "5.5", units="mmol/L"),
+        _entry("precise", BASE + 1, 5.51, units="MMOL"),
+        _entry("mgdl", BASE + 2, 99.08, units="mg/dL"),
+        _entry("implicit", BASE + 3, 99.09),
+        _entry("overflow", BASE + 4, "1e308", units="mmol/L"),
+        _entry("invalid-type", BASE + 5, True, units="mmol/L"),
+        _entry("nonfinite", BASE + 6, "inf", units="mmol/L"),
+    ]
+    source = wire.NightscoutSGVSource(client)
+
+    readings = asyncio.run(source.read_range(BASE, BASE + 7))
+    assert [(row["id"], row["date"], row["sgv"]) for row in readings] == [
+        ("explicit", BASE, 99.088),
+        ("precise", BASE + 1, 99.26816),
+        ("mgdl", BASE + 2, 99.08),
+        ("implicit", BASE + 3, 99.09),
+    ]
+
+
+def test_v3_history_canonicalizes_explicit_mmol_sgv_at_source_measurement_time():
+    client = _Client()
+    client.history = [_entry("edited", BASE - 3, 5.5, units="mmol", srvModified=BASE + 1)]
+    source = wire.NightscoutSGVSource(client)
+
+    changes, cursor = asyncio.run(source.read_changes(BASE))
+    assert changes == [
+        {"id": "edited", "date": BASE - 3, "sgv": 99.088, "direction": None, "modified": BASE + 1},
+    ]
+    assert cursor == BASE + 1
 
 
 def test_v3_history_invalid_corrections_do_not_hide_valid_siblings():

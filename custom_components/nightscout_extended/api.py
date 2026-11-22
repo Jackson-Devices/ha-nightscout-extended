@@ -11,6 +11,7 @@ import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, DecimalException, localcontext
 from time import time
 from typing import Any, Literal
 from urllib.parse import quote
@@ -18,7 +19,8 @@ from urllib.parse import quote
 import aiohttp
 from yarl import URL
 
-MMOL_PER_MGDL = 1 / 18.0182
+# Home Assistant's glucose molar mass (180.16 g/mol) divided by 10.
+_MGDL_PER_MMOL = Decimal("18.016")
 
 PROPERTIES = "bgnow,delta,direction,iob,cob,ar2,basal"
 _V1_TREATMENTS = "/api/v1/treatments.json"
@@ -180,6 +182,24 @@ def _object(value: Any) -> dict[str, Any]:
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _sgv_mgdl(row: dict[str, Any]) -> float | None:
+    raw = row.get("sgv")
+    value = _num(raw)
+    units = _text(row.get("units"))
+    if value is None or units is None or units.lower() not in ("mmol", "mmol/l"):
+        return value
+
+    try:
+        amount = Decimal(raw if isinstance(raw, (int, str)) else str(value))
+        # Preserve the decimal product until conversion to the stored float.
+        # An intermediate binary rounding can break exact bgnow association.
+        with localcontext() as context:
+            context.prec = len(amount.as_tuple().digits) + len(_MGDL_PER_MMOL.as_tuple().digits)
+            return _num(amount * _MGDL_PER_MMOL)
+    except DecimalException:
+        return value if value == 0 else None
 
 
 def parse_properties(props: dict[str, Any]) -> NightscoutData:
@@ -601,16 +621,13 @@ class NightscoutClient:
                 if row.get("type") != "sgv" or row.get("isValid") is False:
                     continue
                 when = _ms_to_dt(row.get("date")) or _parse_iso(row.get("dateString"))
-                value = _num(row.get("sgv"))
+                value = _sgv_mgdl(row)
                 if when is None or value is None:
                     continue
-                units = row.get("units")
-                if isinstance(units, str) and units.lower() in ("mmol", "mmol/l"):
-                    value /= MMOL_PER_MGDL
                 if when > now and (when != future_bgnow or value != bgnow_glucose):
                     continue
                 # Nightscout's bgnow excludes CGM error and sentinel readings.
-                if math.isfinite(value) and value > 39:
+                if value > 39:
                     direction = row.get("direction")
                     candidates.append((when, value, direction if isinstance(direction, str) else None))
             if candidates:

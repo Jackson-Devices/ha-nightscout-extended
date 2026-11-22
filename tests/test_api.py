@@ -490,15 +490,53 @@ def test_v3_uses_newest_usable_sgv_and_keeps_computed_property_clock():
     assert "/api/v1/treatments.json" not in [path for path, _ in fixture.calls]
 
 
-def test_v3_glucose_in_mmol_rows_normalizes_to_native_mgdl_and_keeps_matching_delta():
+@pytest.mark.parametrize(
+    ("calculated_value", "calculated_offset", "expected_delta"),
+    [(180.16, 0, 6), (None, 0, None), (180.16, -1, None), (180.15999999999997, 0, None)],
+)
+def test_v3_explicit_mmol_sgv_uses_ha_factor_and_requires_exact_calculated_metadata(
+    calculated_value, calculated_offset, expected_delta,
+):
     fixture = _V3Fixture()
+    measured_ms = PROPS["bgnow"]["mills"]
     fixture.entry_rows = [{
-        "type": "sgv", "date": PROPS["bgnow"]["mills"],
-        "sgv": 155 * api.MMOL_PER_MGDL, "units": "mmol/L", "direction": "FortyFiveUp",
+        "type": "sgv", "date": measured_ms, "sgv": 10,
+        "units": "mmol/L", "direction": "FortyFiveUp",
     }]
+    bgnow = {} if calculated_value is None else {
+        "last": calculated_value, "mills": measured_ms + calculated_offset,
+    }
+    delta = {} if calculated_value is None else {"mgdl": 6}
+
+    async def handle(request):
+        if request.path.startswith("/api/v2/properties/"):
+            return web.json_response({**PROPS, "bgnow": bgnow, "delta": delta})
+        return await fixture.handle(request)
+
+    _, result = asyncio.run(_v3_server(handle, _configured_data))
+    assert result.glucose == 180.16
+    assert result.glucose_time == datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+    assert result.delta == expected_delta and result.direction == "FortyFiveUp"
+    if calculated_value is None:
+        assert result.forecast_source_time is None
+
+
+def test_v3_malformed_explicit_mmol_sgv_leaves_a_usable_mgdl_row():
+    fixture = _V3Fixture()
+    measured_ms = PROPS["bgnow"]["mills"]
+    invalid_values = (True, "nan", "invalid", "1__0", "1e308", "1e309")
+    fixture.entry_rows = [
+        {"type": "sgv", "date": measured_ms + offset, "sgv": value, "units": "mmol/L"}
+        for offset, value in enumerate(invalid_values, start=1)
+    ]
+    fixture.entry_rows.append({
+        "type": "sgv", "date": measured_ms, "sgv": 155, "units": "mg/dL",
+    })
+
     _, result = asyncio.run(_v3_server(fixture.handle, _configured_data))
-    assert result.glucose == pytest.approx(155)
-    assert result.delta == 6 and result.direction == "FortyFiveUp"
+    assert result.glucose == 155
+    assert result.glucose_time == datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+    assert result.delta == 6
 
 
 _SGV_CLOCK = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)

@@ -203,6 +203,7 @@ nonzero value at or before the current time using the treatment's event time.
 [stock-qa-pr]: https://github.com/Jackson-Devices/ha-nightscout-extended/pull/2
 [stock-qa-matrix]: https://github.com/Jackson-Devices/ha-nightscout-extended/blob/0817305cc69733cbffe4e23f9e995b7e84c4fc19/docs/nightscout-stock-parity.md
 [stock-release]: https://github.com/nightscout/cgm-remote-monitor/commit/9cd304f78a5c12401c9711cbd56d2a12eaca0632
+[ha-glucose-conversion]: https://github.com/home-assistant/core/blob/357cae5c598dfcd7a0ea7dc5b1facccd4ec6037b/homeassistant/util/unit_conversion.py#L230-L238
 [stock-v1]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/server/swagger.yaml
 [stock-v3]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api3/swagger.yaml
 [stock-status]: https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/api/status.js
@@ -219,6 +220,13 @@ A poll may find zero, one, or many new or revised readings. The source measureme
 the sample and is what `last_reading` and history use. The v3 server's modification clock (`srvModified`) tracks
 changes, including late uploads with older measurement times. Home Assistant observes these changes on its own
 polling schedule. A late reading can fill the chart at its original time without advancing current glucose.
+Raw SGV explicitly labelled `mmol` or `mmol/L` is converted to mg/dL with the
+[Home Assistant glucose conversion factor][ha-glucose-conversion] of 18.016. Raw mg/dL values retain their
+amounts. In a synthetic Nightscout 15.0.6 check, v1 and v3 returned the raw 10 mmol/L sample with its original
+measurement time. Stock v2 properties had no calculated `bgnow` measurement or delta for that sample.
+The integration can show the raw sample as 180.16 mg/dL with its original time. It associates a calculated
+delta only when the calculated amount and timestamp exactly match the selected reading.
+
 Quiet polls preserve existing samples and timestamps. Repeated reads use stable record IDs to avoid duplicates,
 and distinct IDs can share a timestamp. [Native v3 history handler][stock-history]
 
@@ -250,7 +258,8 @@ dates on demand. Recently fetched ranges can be reused briefly in memory and do 
 V1 rereads the retained range on each poll. It adds returned readings and updates records with the same ID.
 An omitted record stays in local history until it ages out because V1 cannot establish whether it was
 hard-deleted. V3 applies reported soft deletes through the change feed and checks the retained range
-periodically for hard deletes and older uploads. Server limits or missing raw-read permission can leave
+periodically for hard deletes and older uploads. Existing local readings pick up the conversion when their
+source rows are refreshed. Server limits or missing raw-read permission can leave
 gaps, even when a legacy current glucose reading is available. Recovery depends on the records
 Nightscout makes available.
 
