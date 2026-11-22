@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "scope": "Synthetic stock baseline, independent normal Codex Cloud. This reviewable summary preserves the measured results and hashes of the original verifier receipts.",
+  "qualification": "red",
+  "inputs": {
+    "stock_release": "15.0.6",
+    "stock_source": "9cd304f78a5c12401c9711cbd56d2a12eaca0632",
+    "container": "docker.io/nightscout/cgm-remote-monitor:15.0.6@sha256:868f024f0aaf746aa9c6f639b4add7a78b07bcf4382f9955c5af61d413cad989",
+    "ha": "2026.10.4",
+    "pytest_homeassistant_custom_component": "0.13.375",
+    "python": "3.14.4",
+    "untouched_legacy": "a8acabe41d6380f6647f9863c37bc9d776ffc9cc",
+    "candidate": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+    "qualification": "0817305cc69733cbffe4e23f9e995b7e84c4fc19",
+    "untouched_legacy_plus_parser_regressions": "fdce9383d5d369bcd31b5e10def8791b8747549c",
+    "same_product_bytes": true,
+    "frozen_sha": "f1a4e7dddf071f2c6d3eb2b27499ee4536d76ab3",
+    "frozen_blobs": [
+      {
+        "path": "tests_contract/contract/cases.json",
+        "git_blob_sha1": "6801c0bd203b8f6fe2674542abba46a8e3e1cb57"
+      },
+      {
+        "path": "tests_contract/contract/controls.py",
+        "git_blob_sha1": "f76791237baae9c96de129d11917af85eab8a10f"
+      },
+      {
+        "path": "tests_contract/contract/expected.json",
+        "git_blob_sha1": "b8efd3a467041fbb37d1512299f475d406d5e811"
+      },
+      {
+        "path": "tests_contract/contract/run.py",
+        "git_blob_sha1": "8771627391a0479c4af88cfb14492943f858756f"
+      },
+      {
+        "path": "tests_contract/contract/service.py",
+        "git_blob_sha1": "596dc99ab87ff9f2f975c23857dc80513b5cd4f4"
+      }
+    ]
+  },
+  "native": {
+    "observation_time_utc": "2026-11-22T13:29:00Z",
+    "same_seed_same_server": true,
+    "permissions": {
+      "anonymous_and_subject_same_read_grants": true,
+      "entry_create_denied": true,
+      "unauthenticated_v3_entries_http": 401
+    },
+    "rows_by_read_api": {
+      "v1": {
+        "entries": 4,
+        "treatments": 8,
+        "devicestatus": 2,
+        "profile": 1
+      },
+      "v2_alias": {
+        "entries": 4,
+        "treatments": 8,
+        "devicestatus": 2,
+        "profile": 1
+      },
+      "v3": {
+        "entries": 4,
+        "treatments": 8,
+        "devicestatus": 2,
+        "profile": 1
+      }
+    },
+    "typed_treatment_examples": {
+      "zero_carbs": 0,
+      "insulin": 1.25,
+      "duration_minutes": 30
+    },
+    "counted_schema_disagreements": [
+      {
+        "route": "/api/v1/treatments.json",
+        "field": "carbs",
+        "occurrences": 6,
+        "wire_type": "null",
+        "swagger_type": "number"
+      },
+      {
+        "route": "/api/v1/treatments.json",
+        "field": "insulin",
+        "occurrences": 7,
+        "wire_type": "null",
+        "swagger_type": "number"
+      },
+      {
+        "route": "/api/v2/treatments.json",
+        "field": "carbs",
+        "occurrences": 6,
+        "wire_type": "null",
+        "swagger_type": "number"
+      },
+      {
+        "route": "/api/v2/treatments.json",
+        "field": "insulin",
+        "occurrences": 7,
+        "wire_type": "null",
+        "swagger_type": "number"
+      }
+    ],
+    "v3_missing_quantities": "absent",
+    "scope_of_count": "Only the baseline runner's explicit field checks. Further literal OpenAPI validation is tracked separately.",
+    "latest_sgv": {
+      "mgdl": 180,
+      "measured_utc": "2026-11-22T13:28:00Z",
+      "v2_bgnow_same": true,
+      "native_delta_mgdl": 12
+    },
+    "native_ar2": [
+      {
+        "horizon_min": 15,
+        "mgdl": 199,
+        "target_utc": "2026-11-22T13:43:02Z"
+      },
+      {
+        "horizon_min": 30,
+        "mgdl": 204,
+        "target_utc": "2026-11-22T13:58:02Z"
+      }
+    ],
+    "properties": {
+      "iob_units": 1.375,
+      "cob_grams": 7.5,
+      "basal_units_per_hour": 0.85
+    },
+    "reservoir": {
+      "units": 0,
+      "contact_utc": "2026-11-22T13:27:00Z",
+      "uploaded_utc": "2026-11-22T13:27:45Z"
+    },
+    "maintenance_elapsed_hours": {
+      "sensor": 20,
+      "insulin": 40,
+      "site": 60,
+      "battery": 96
+    },
+    "late_history": {
+      "cursor_advanced": true,
+      "newest_measurement_unchanged": true
+    },
+    "disposable_resources_left": 0
+  },
+  "client_and_harness": {
+    "stock_ha": {
+      "exit": 2,
+      "observed_profiles": 0,
+      "loader_failures": 3
+    },
+    "controlled_three_way": {
+      "exit": 2,
+      "observed_cases": 0,
+      "loader_failures": 8,
+      "phase": "config_flow/UnknownHandler"
+    },
+    "api_candidate": {
+      "passed": 73,
+      "failed": 9
+    },
+    "api_main": {
+      "passed": 26,
+      "failed": 15
+    },
+    "ha_scheduled": {
+      "passed": 4,
+      "failed": 15,
+      "deselected": 51
+    },
+    "forecast_observer": {
+      "passed": 6,
+      "failed": 0
+    },
+    "integrated_supplemental": {
+      "passed": 12,
+      "failed": 2,
+      "latest_bolus_expected_u": 2.5,
+      "latest_bolus_observed_u": 7.25,
+      "cases": [
+        "T-LEGACY/1",
+        "T-FUTURE-OVERLAP/6"
+      ]
+    },
+    "frozen_raw": {
+      "passed": 1,
+      "case_mismatches": 12,
+      "field_differences": 72,
+      "harness_errors": 0,
+      "controls_exit_codes": [
+        0,
+        1,
+        1,
+        2
+      ]
+    }
+  },
+  "original_receipts_sha256": {
+    "stock": "0e8e8ddb42537ba741fb67e117375f944aa602b59475615848402d6472128507",
+    "three_way": "68eb8496313f7271aa4a89ffd7475cdf232f1750db809705c172baa236d86b5e",
+    "phase_a": "9dc176f2d7a9ab2a890031eaa0483ec963f940478280cf48ab72c809515eb786"
+  }
+}
