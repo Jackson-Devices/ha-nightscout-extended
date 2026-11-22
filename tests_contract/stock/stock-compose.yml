@@ -1,0 +1,5 @@
+# Extends the existing pinned, loopback-only disposable server.
+services:
+  nightscout:
+    environment:
+      ENABLE: 'ar2 iob cob basal'
