@@ -6,6 +6,7 @@ Kept free of Home Assistant imports so the parsing can be tested on its own.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -154,6 +155,16 @@ def _parse_time(item: dict[str, Any]) -> datetime | None:
     return _ms_to_dt(item.get("mills") or item.get("date"))
 
 
+def _treatment_number(value: Any) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    try:
+        value = float(value)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def parse_treatments(items: Any) -> list[Treatment]:
     """Turn /api/v1/treatments.json into Treatments, oldest first. Unusable entries are skipped."""
     out: list[Treatment] = []
@@ -171,11 +182,11 @@ def parse_treatments(items: Any) -> list[Treatment]:
                 uid=str(item.get("_id") or item.get("identifier") or f"{item.get('eventType')}-{when.isoformat()}"),
                 time=when,
                 event_type=str(item.get("eventType") or "Treatment"),
-                carbs=_num(item.get("carbs")) or None,
-                insulin=_num(item.get("insulin")) or None,
+                carbs=_treatment_number(item.get("carbs")),
+                insulin=_treatment_number(item.get("insulin")),
                 notes=notes if isinstance(notes, str) and notes.strip() else None,
                 entered_by=item.get("enteredBy") if isinstance(item.get("enteredBy"), str) else None,
-                duration_min=_num(item.get("duration")) or None,
+                duration_min=_treatment_number(item.get("duration")),
             )
         )
     out.sort(key=lambda t: t.time)
