@@ -104,3 +104,23 @@ def pytest_internalerror(excrepr, excinfo):
 
 def pytest_sessionfinish(session, exitstatus):
     record(f"Collected {session.testscollected}, failed {session.testsfailed}, status {int(exitstatus)}")
+
+    # Pytest assigns xfail/xpass before recording the terminal categories, and
+    # setup/teardown successes use the empty category instead of "passed".
+    stats = session.config.pluginmanager.get_plugin("terminalreporter").stats
+    errors = stats.get("error", ())
+    skips = stats.get("skipped", ())
+    counts = {
+        "passed": len(stats.get("passed", ())),
+        "failed": len(stats.get("failed", ())),
+        "skipped": sum(report.when != "collect" for report in skips),
+        "xfailed": len(stats.get("xfailed", ())),
+        "xpassed": len(stats.get("xpassed", ())),
+        "errors": len(errors),
+        "setup_errors": sum(report.when == "setup" for report in errors),
+        "teardown_errors": sum(report.when == "teardown" for report in errors),
+        "collection_errors": sum(report.when == "collect" for report in errors),
+        "collection_skipped": sum(report.when == "collect" for report in skips),
+        "deselected": len(stats.get("deselected", ())),
+    }
+    record("Outcomes " + " ".join(f"{name}={count}" for name, count in counts.items()))
