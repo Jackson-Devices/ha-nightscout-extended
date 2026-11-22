@@ -196,7 +196,7 @@ def states_from(hass):
 
 async def test_observe(hass, aioclient_mock, freezer, enable_custom_integrations):
     """Child entry point. Compare in the parent so case evidence survives failures."""
-    from homeassistant import config_entries
+    from homeassistant import config_entries, loader
     from homeassistant.const import CONF_API_KEY, CONF_URL
     from homeassistant.data_entry_flow import FlowResultType
 
@@ -205,15 +205,9 @@ async def test_observe(hass, aioclient_mock, freezer, enable_custom_integrations
     site = FixtureSite(scene, mode)
     aioclient_mock.clear_requests()
     aioclient_mock.get(re.compile(rf"^{re.escape(URL)}/"), side_effect=site.handle)
-    result = {"phase": "config_flow", "entry_loaded": False}
+    result = {"phase": "stage_import", "entry_loaded": False}
     try:
-        flow = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
-        if flow["type"] == FlowResultType.FORM:
-            flow = await hass.config_entries.flow.async_configure(
-                flow["flow_id"], {CONF_URL: URL, CONF_API_KEY: site.subject},
-            )
-        result["flow_type"] = str(flow["type"])
-        module = import_module(f"custom_components.{DOMAIN}")
+        module = await hass.async_add_executor_job(import_module, f"custom_components.{DOMAIN}")
         origin = Path(module.__file__).resolve()
         expected_origin = (COMPONENT / "__init__.py").resolve()
         if origin != expected_origin:
@@ -223,6 +217,17 @@ async def test_observe(hass, aioclient_mock, freezer, enable_custom_integrations
         result["versions"] = {"python": sys.version.split()[0], **{
             name: metadata.version(name) for name in ("homeassistant", "pytest", "pytest-homeassistant-custom-component")
         }}
+        result["phase"] = "ha_discovery"
+        integration = await loader.async_get_integration(hass, DOMAIN)
+        if integration.file_path.resolve() != origin.parent:
+            raise RuntimeError("HA discovered the wrong product stage")
+        result["phase"] = "config_flow"
+        flow = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+        if flow["type"] == FlowResultType.FORM:
+            flow = await hass.config_entries.flow.async_configure(
+                flow["flow_id"], {CONF_URL: URL, CONF_API_KEY: site.subject},
+            )
+        result["flow_type"] = str(flow["type"])
         if flow["type"] == FlowResultType.CREATE_ENTRY:
             entry = flow["result"]
             await hass.async_block_till_done()
@@ -341,6 +346,8 @@ def classify(scene, mode, observed):
 def stage_product(source, stage):
     staged = stage / COMPONENT
     shutil.copytree(source / COMPONENT, staged, ignore=shutil.ignore_patterns("__pycache__", "*.py[co]"))
+    # Give the native loader a real staged package with an unambiguous root.
+    (staged.parent / "__init__.py").touch()
     files = {
         path.relative_to(staged).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(staged.rglob("*")) if path.is_file()
@@ -359,13 +366,16 @@ def run_case(scene, mode, source, interpreter):
             shutil.copyfile(__file__, stage / "test_three_way.py")
             (stage / "case.json").write_text(json.dumps([scene, mode]), encoding="utf-8")
             (stage / "conftest.py").write_text(
-                'pytest_plugins = ["pytest_homeassistant_custom_component"]\n', encoding="utf-8",
+                'import pytest\n\npytest_plugins = ["pytest_homeassistant_custom_component"]\n\n'
+                '@pytest.fixture\ndef hass_config_dir(tmp_path):\n    return str(tmp_path)\n',
+                encoding="utf-8",
             )
             (stage / "pytest.ini").write_text("[pytest]\nasyncio_mode = auto\npythonpath = .\n", encoding="utf-8")
             inherited = ("SystemRoot", "WINDIR", "PATH", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL")
             environment = {key: os.environ[key] for key in inherited if key in os.environ}
             finished = subprocess.run(
                 [str(interpreter), "-I", "-m", "pytest", "-c", "pytest.ini", "-q", "--tb=no",
+                 "--basetemp=pytest-tmp",
                  "--disable-socket", "--allow-unix-socket", "test_three_way.py::test_observe"],
                 cwd=stage, env=environment, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90, check=False,
