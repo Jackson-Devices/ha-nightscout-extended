@@ -1,0 +1,14 @@
+# The integration has no Python or npm dependencies of its own (manifest.json "requirements" is empty and
+# there is no package.json), so the only thing to keep current is the GitHub Actions used by the workflows.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
