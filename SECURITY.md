@@ -11,12 +11,16 @@ Only the latest release gets security fixes. Update to it before reporting.
 
 ## Reporting a vulnerability
 
-Please **don't open a public issue or pull request** for a security problem.
+Please **don't open a public issue, discussion or pull request** for a security problem.
 
 Report it privately through GitHub instead:
 [Report a vulnerability](https://github.com/Jackson-Devices/ha-nightscout-extended/security/advisories/new)
 (the **Security** tab → **Advisories** → **Report a vulnerability**).
 [How GitHub's private reporting works](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately)
+
+If the button is unavailable, check this repository and its upstream for a documented private reporting channel.
+If neither publishes one, ask a maintainer only for their preferred private security contact. Keep vulnerability
+details, code, site URLs and clinical data out of public issues, discussions and pull requests.
 
 Include:
 
