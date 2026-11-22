@@ -8,6 +8,7 @@ the mode. The server owner separately proves the equivalence of read rights.
 
 from contextlib import contextmanager
 import hashlib
+from importlib import import_module
 from importlib.metadata import version
 import ipaddress
 import json
@@ -39,7 +40,8 @@ ROUTE_PATHS = {
 }
 PROTECTED_ROUTES = {"v3_entries", "v3_entries_history", "v3_last_modified", "v3_treatments", "v3_devicestatus"}
 LEGACY_COLLECTIONS = {"v1_entries", "v1_treatments", "v1_devicestatus"}
-PACKAGE = f"custom_components.{DOMAIN}"
+CUSTOM_COMPONENTS = "custom_components"
+PACKAGE = f"{CUSTOM_COMPONENTS}.{DOMAIN}"
 
 
 def _route(path):
@@ -80,7 +82,7 @@ def _launch():
     if now.microsecond % 1000:
         raise ValueError("the observation instant must be millisecond-aligned")
     expected = expected_projection(request["expected"], now)
-    return request, root, component, now, expected
+    return request, component, now, expected
 
 
 @contextmanager
@@ -104,33 +106,29 @@ def _discard_runtime_output():
                     os.close(previous)
 
 
-def _runner_fixtures(pytest, bundle, config_dir, result):
-    class ProbeFixtures:
-        @pytest.fixture
-        def probe_bundle(self):
-            return bundle, result
+if __name__ != "__main__":
+    import pytest
 
-        @pytest.fixture
-        def hass_config_dir(self):
-            return str(config_dir)
+    # Module-local fixtures override the installed HA plugin defaults.
+    @pytest.fixture
+    def hass_config_dir(probe_bundle):
+        _, config, _ = probe_bundle
+        return str(config)
 
-        @pytest.fixture
-        def hass_storage(self, monkeypatch):
-            # Replace the HA test suite's broad storage fixture. Keep real disk
-            # storage for history and reservoir, but prevent storing the config
-            # entry, whose real flow contains the ephemeral private subject.
-            from homeassistant.helpers.storage import Store
+    @pytest.fixture
+    def hass_storage(monkeypatch):
+        # Keep genuine disk storage for product data. Only HA's config entries,
+        # whose real flow contains the ephemeral subject, stay unwritten.
+        from homeassistant.helpers.storage import Store
 
-            write = Store._async_write_data
+        write = Store._async_write_data
 
-            async def write_except_config_entries(store, data):
-                if store.key != "core.config_entries":
-                    await write(store, data)
+        async def write_except_config_entries(store, data):
+            if store.key != "core.config_entries":
+                await write(store, data)
 
-            monkeypatch.setattr(Store, "_async_write_data", write_except_config_entries)
-            return {}
-
-    return ProbeFixtures()
+        monkeypatch.setattr(Store, "_async_write_data", write_except_config_entries)
+        return {}
 
 
 def _route_callback(launch, records):
@@ -211,6 +209,30 @@ def _source_proof(component):
     return files
 
 
+def _stage_custom_components(config, component):
+    """Give HA an isolated package containing only the exact staged product."""
+    namespace = config / CUSTOM_COMPONENTS
+    namespace.mkdir()
+    initializer = namespace / "__init__.py"
+    initializer.touch()
+    (namespace / DOMAIN).symlink_to(component, target_is_directory=True)
+
+    if CUSTOM_COMPONENTS in sys.modules:
+        raise RuntimeError("custom_components was imported before probe staging")
+    config_path = str(config)
+    sys.path.insert(0, config_path)
+    try:
+        package = import_module(CUSTOM_COMPONENTS)
+    finally:
+        sys.path.remove(config_path)
+        sys.path_importer_cache.pop(config_path, None)
+    if (
+        Path(package.__file__).resolve(strict=True) != initializer
+        or tuple(Path(path).resolve(strict=True) for path in package.__path__) != (namespace,)
+    ):
+        raise RuntimeError("custom_components resolved outside probe staging")
+
+
 async def test_private_stock_mode(hass, freezer, enable_custom_integrations, socket_enabled, probe_bundle):
     """Load a normal config entry, observe native HA outputs, and unload it."""
     from homeassistant import config_entries, loader
@@ -221,23 +243,40 @@ async def test_private_stock_mode(hass, freezer, enable_custom_integrations, soc
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
     from pytest_socket import socket_allow_hosts
 
-    (launch, _root, component, now, reference), result = probe_bundle
+    (launch, component, now, reference), config, result = probe_bundle
     mode = launch["mode"]
     attestation = result["attestation"]
     attestation["routes"] = []
     attestation["storage"] = "fresh_disk_except_ha_config_entries"
     attestation["observed_at"] = now.isoformat()
+    result["error_phase"] = "ha_config_dir"
+    attestation["exact_temp_config_dir"] = Path(hass.config.config_dir).resolve(strict=True) == config
+    if not attestation["exact_temp_config_dir"]:
+        return
     socket_allow_hosts([urlsplit(launch["url"]).hostname])
     freezer.move_to(now)
     await hass.config.async_set_time_zone("UTC")
     client = async_get_clientsession(hass)
     client.trace_configs.append(_route_callback(launch, attestation["routes"]))
 
+    result["error_phase"] = "ha_product_import"
+    product = await hass.async_add_executor_job(import_module, PACKAGE)
+    attestation["exact_product_package"] = (
+        Path(product.__file__).resolve(strict=True) == component / "__init__.py"
+        and tuple(Path(path).resolve(strict=True) for path in product.__path__) == (component,)
+    )
+    if not attestation["exact_product_package"]:
+        return
+
     result["error_phase"] = "ha_loader"
     integration = await loader.async_get_integration(hass, DOMAIN)
-    attestation["exact_product_root"] = integration.file_path.resolve() == component
+    attestation["exact_product_root"] = (
+        integration.pkg_path == PACKAGE and not integration.is_built_in
+        and integration.file_path.resolve(strict=True) == component
+    )
     if not attestation["exact_product_root"]:
         return
+    attestation["manifest_sha256"] = hashlib.sha256((component / "manifest.json").read_bytes()).hexdigest()
 
     result["error_phase"] = "ha_config_flow"
     form = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
@@ -347,20 +386,29 @@ async def test_private_stock_mode(hass, freezer, enable_custom_integrations, soc
 
 
 def _run(pytest, bundle, result):
-    _launch, root, _component, _now, _expected = bundle
-    sys.path.insert(0, str(root))
+    _launch, component, _now, _expected = bundle
     sys.dont_write_bytecode = True
     with TemporaryDirectory(prefix="nsx-stock-ha-") as temp:
-        work = Path(temp)
+        work = Path(temp).resolve(strict=True)
         config = work / "configuration"
         config.mkdir()
+        result["error_phase"] = "ha_namespace_staging"
+        _stage_custom_components(config, component)
+        result["attestation"]["isolated_custom_components"] = True
         ini = work / "pytest.ini"
         ini.write_text("[pytest]\nasyncio_mode = auto\nasyncio_default_fixture_loop_scope = function\n", encoding="utf-8")
         selection = f"{Path(__file__).resolve()}::test_private_stock_mode"
+        result["error_phase"] = "ha_fixture_setup"
+
+        class ProbeInput:
+            @pytest.fixture
+            def probe_bundle(self):
+                return bundle, config, result
+
         return pytest.main(
             ["-q", "--tb=no", "--capture=no", "--import-mode=importlib", "--noconftest", "-c", str(ini),
              "-p", "no:cacheprovider", "--basetemp", str(work / "pytest"), selection],
-            plugins=["pytest_homeassistant_custom_component", _runner_fixtures(pytest, bundle, config, result)],
+            plugins=["pytest_homeassistant_custom_component", ProbeInput()],
         )
 
 
