@@ -47,11 +47,15 @@ class Stock:
         if not secret_file.exists():
             raise RuntimeError(f"No stock server state in {STATE_DIR}; run tests_parity/stock.sh start <profile>")
         self.secret = secret_file.read_text()
-        self.secret_sha1 = hashlib.sha1(self.secret.encode()).hexdigest()
         self.profile = (STATE_DIR / "profile").read_text()
         # Session fixtures are created before the per-test socket fixture runs.
         pytest_socket.enable_socket()
         pytest_socket.socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
+
+    @property
+    def setup_headers(self) -> dict[str, str]:
+        """15.0.6 lib/server/enclave.js accepts a SHA-512 hex digest for fixture setup."""
+        return {"api-secret": hashlib.sha512(self.secret.encode()).hexdigest()}
 
     # ---- HTTP -------------------------------------------------------------
 
@@ -68,8 +72,13 @@ class Stock:
             BASE_URL + path,
             data=json.dumps(body).encode(),
             method="POST",
-            headers={"Content-Type": "application/json", "api-secret": self.secret_sha1},
+            headers={"Content-Type": "application/json", **self.setup_headers},
         )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response.read()
+
+    def delete(self, path: str) -> None:
+        request = urllib.request.Request(BASE_URL + path, headers=self.setup_headers, method="DELETE")
         with urllib.request.urlopen(request, timeout=20) as response:
             response.read()
 

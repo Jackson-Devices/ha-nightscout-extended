@@ -19,6 +19,14 @@ jobs:
         with:
           python-version: '3.14'
           cache: ''
+      - name: Check workflow gates
+        shell: bash
+        run: |
+          python -m pip --disable-pip-version-check install --only-binary :all: --require-hashes -r .github/scripts/requirements-preflight.txt
+          python .github/scripts/check_workflow_gates.py
+          python .github/scripts/test_workflow_gates.py
+          python -m pip --disable-pip-version-check install --only-binary :all: -r tests_parity/requirements.txt
+          python -m pytest --noconftest -c /dev/null -q tests_parity/test_stock_contract.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
@@ -26,7 +34,14 @@ jobs:
       - name: Check Python and card syntax
         shell: bash
         run: |
-          python -m compileall -q custom_components/nightscout_extended tests tests_ha
+          python -m compileall -q custom_components/nightscout_extended tests tests_ha .github/scripts
+          if [[ -d tests_parity ]]; then
+            python -m compileall -q tests_parity
+            git ls-files -z -- ':(glob)tests_parity/**/*.mjs' > "$RUNNER_TEMP/parity-js-files"
+            while IFS= read -r -d '' script; do
+              node --check "$script"
+            done < "$RUNNER_TEMP/parity-js-files"
+          fi
           node --check custom_components/nightscout_extended/www/nightscout-glucose-card.js
       - name: Lint workflows and changelog script
         shell: bash
@@ -48,3 +63,6 @@ jobs:
           mapfile -d '' -t workflows < "$lint_dir/workflows"
           "$lint_dir/actionlint" -shellcheck "$shellcheck_bin" "${workflows[@]}"
           "$shellcheck_bin" .github/scripts/changelog-section.sh
+          if [[ -d tests_parity ]]; then
+            "$shellcheck_bin" tests_parity/stock.sh
+          fi

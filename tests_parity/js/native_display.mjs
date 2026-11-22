@@ -1,10 +1,7 @@
-// Nightscout's own current-reading display, run from the stock server's source.
+// Nightscout's own current-reading display and non-alarming paint from the pinned stock server.
 //
-// Input (stdin JSON): { lib, settings: { units, thresholds, theme }, cases: [mgdl, ...] }
-// Output: [{ mgdl, text, cls }]
-//
-// The functions are extracted verbatim from lib/client/index.js of the running stock container and evaluated
-// with only the objects they reference stubbed out. Nothing here re-implements Nightscout's rules.
+// Input (stdin JSON): { lib, css?, settings: { units, thresholds, theme }, cases: [mgdl, ...] }
+// Output: [{ mgdl, text, rangeClass, paint?: { background, foreground } }]
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -25,27 +22,59 @@ function extract(name) {
   throw new Error(`Could not find the end of ${name}`);
 }
 
+// Read the pinned main.css declarations applied to the idle page and its current BG button.
+// The button's text inherits body color when the stock script applies no range class.
+// Refuse changes to these selectors/declarations rather than guessing a replacement palette.
+const rules = input.css === undefined
+  ? null
+  : [...input.css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+function declaration(selector, property) {
+  const matches = rules.filter(([, selectors]) => selectors.trim() === selector);
+  if (matches.length !== 1) throw new Error(`Expected a single Nightscout style rule for ${selector}`);
+  const value = matches[0][2].match(new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`))?.[1].trim();
+  if (!value) throw new Error(`Missing ${property} for Nightscout style rule ${selector}`);
+  return value;
+}
+const idlePaint = rules && { background: declaration("body", "background"), foreground: declaration("body", "color") };
+
 const client = {
   settings: input.settings,
   timeago: { checkStatus: () => "current" },
   sbx: {},
   errorcodes: { toDisplay: (value) => `error code ${value}` },
 };
+const container = {
+  rangeClass: "",
+  removeClass() { this.rangeClass = ""; },
+  addClass(value) { this.rangeClass = value; },
+};
 const currentBG = {
   out: "",
   text(value) { this.out = String(value); return this; },
   html(value) { this.out = String(value); return this; },
+  toggleClass() {},
 };
+const bgStatus = { toggleClass() {} };
 const make = new Function(
-  "client", "units", "currentBG", "adjustCurrentSGVClasses",
-  [extract("scaleBg"), extract("sgvToColoredRange"), extract("updateCurrentSGV"),
-    "return { sgvToColoredRange, updateCurrentSGV };"].join("\n"),
+  "client", "units", "currentBG", "container", "bgStatus", "inRetroMode", "alarmingNow",
+  [
+    extract("scaleBg"),
+    extract("sgvToColoredRange"),
+    extract("adjustCurrentSGVClasses"),
+    extract("updateCurrentSGV"),
+    "return updateCurrentSGV;",
+  ].join("\n"),
 );
-const native = make(client, units, currentBG, () => {});
+const updateCurrentSGV = make(client, units, currentBG, container, bgStatus, () => false, () => false);
 
 const out = input.cases.map((mgdl) => {
   currentBG.out = "";
-  native.updateCurrentSGV({ mgdl });
-  return { mgdl, text: currentBG.out, cls: native.sgvToColoredRange(mgdl) };
+  updateCurrentSGV({ mgdl });
+  const { rangeClass } = container;
+  if (!idlePaint) return { mgdl, text: currentBG.out, rangeClass };
+  const paint = rangeClass
+    ? { ...idlePaint, foreground: declaration(`.${rangeClass} .bgButton`, "color") }
+    : idlePaint;
+  return { mgdl, text: currentBG.out, rangeClass, paint };
 });
 process.stdout.write(JSON.stringify(out));

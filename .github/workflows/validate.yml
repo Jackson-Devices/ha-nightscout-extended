@@ -32,7 +32,7 @@ jobs:
 
   hassfest:
     needs: preflight
-    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -45,7 +45,7 @@ jobs:
 
   hacs:
     needs: preflight
-    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -58,7 +58,7 @@ jobs:
 
   tests:
     needs: preflight
-    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -72,7 +72,7 @@ jobs:
 
   tests-card:
     needs: preflight
-    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -87,7 +87,7 @@ jobs:
 
   tests-ha:
     needs: preflight
-    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -101,10 +101,13 @@ jobs:
 
   codeql:
     needs: preflight
-    if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) && vars.CODEQL_ADVANCED_ENABLED == 'true' }}
     permissions:
       contents: read
       security-events: write
-    uses: ./.github/workflows/codeql.yml
-    with:
-      preflight_passed: true
+    uses: ./.github/workflows/codeql-scan.yml
+
+  parity:
+    needs: preflight
+    if: ${{ needs.preflight.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
+    uses: ./.github/workflows/parity.yml

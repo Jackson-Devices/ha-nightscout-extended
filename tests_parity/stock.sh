@@ -7,6 +7,7 @@
 # Profiles set the site settings the parity tests compare against. The images are pinned by digest; they
 # are the same pins as the stock-contract harness (tests_contract/harness/versions.lock on the QA branches).
 set -euo pipefail
+umask 077
 
 NS_IMAGE="docker.io/nightscout/cgm-remote-monitor:15.0.6@sha256:868f024f0aaf746aa9c6f639b4add7a78b07bcf4382f9955c5af61d413cad989"
 MONGO_IMAGE="docker.io/library/mongo:5.0.32@sha256:5e3e87afd24d75e722884d777c5713d254f7e88ba65381b5d6484f75a21b73e3"
@@ -15,10 +16,27 @@ NET=parity-net
 MONGO=parity-mongo
 NS=parity-ns
 PORT=1337
+LABEL=org.nightscout.parity.disposable
 
 stop() {
-  docker rm -f "$NS" "$MONGO" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
+  local container
+  for container in "$NS" "$MONGO"; do
+    if docker container inspect "$container" >/dev/null 2>&1; then
+      if [[ $(docker inspect --format '{{ index .Config.Labels "org.nightscout.parity.disposable" }}' "$container") != true ]]; then
+        echo "Refusing to remove unrelated container $container" >&2
+        return 1
+      fi
+      docker rm -fv "$container" >/dev/null
+    fi
+  done
+  rm -f -- "$STATE_DIR/secret" "$STATE_DIR/profile"
+  if docker network inspect "$NET" >/dev/null 2>&1; then
+    if [[ $(docker network inspect --format '{{ index .Labels "org.nightscout.parity.disposable" }}' "$NET") != true ]]; then
+      echo "Refusing to remove unrelated network $NET" >&2
+      return 1
+    fi
+    docker network rm "$NET" >/dev/null
+  fi
 }
 
 start() {
@@ -44,9 +62,9 @@ start() {
   printf '%s' "$secret" > "$STATE_DIR/secret"
   printf '%s' "$profile" > "$STATE_DIR/profile"
 
-  docker network create "$NET" >/dev/null
-  docker run -d --name "$MONGO" --network "$NET" "$MONGO_IMAGE" >/dev/null
-  docker run -d --name "$NS" --network "$NET" -p "127.0.0.1:$PORT:1337" \
+  docker network create --label "$LABEL=true" "$NET" >/dev/null
+  docker run -d --name "$MONGO" --label "$LABEL=true" --network "$NET" "$MONGO_IMAGE" >/dev/null
+  docker run -d --name "$NS" --label "$LABEL=true" --network "$NET" -p "127.0.0.1:$PORT:1337" \
     -e NODE_ENV=production -e TZ=Etc/UTC -e INSECURE_USE_HTTP=true \
     -e MONGO_CONNECTION="mongodb://$MONGO:27017/nightscout" \
     -e API_SECRET="$secret" -e AUTH_DEFAULT_ROLES=readable \
@@ -61,7 +79,7 @@ start() {
     sleep 2
   done
   echo "stock Nightscout did not start" >&2
-  docker logs "$NS" 2>&1 | tail -100 >&2
+  docker inspect --format 'container {{.Name}}: {{.State.Status}} (exit {{.State.ExitCode}})' "$NS" "$MONGO" >&2
   exit 1
 }
 

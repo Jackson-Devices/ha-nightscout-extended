@@ -17,6 +17,28 @@ Note on reviews: the repository owner, Codex and Claude all act through the same
 doesn't let a PR's author request changes. So reviews here are posted as **Comment** reviews. A review saying
 "treat as changes requested" blocks the merge exactly as a formal request would.
 
+## Checking stock parity
+
+Validate runs the cheap workflow preflight first. On an eligible full run its stock job compares the integration
+with a disposable Nightscout 15.0.6 and MongoDB on three site configurations. One site configuration uses
+one running stock server for the equivalent-permission API comparisons. Each profile has its own database.
+
+Use the two Swagger documents from that stock image to identify public operations and validate the wire
+contract. Compare values, original timestamps and missing readings against the same seeded stock server.
+The calculated v2 properties are outside both published schemas and require pinned source and runtime evidence.
+Report a schema disagreement separately from a difference between the integration and stock. A missing
+product path cannot supply a passing product comparison.
+
+While this branch carries the legacy integration, the same stock job also checks out the fork's v3
+candidate at `44f4e7c2809ee00d43a9642e875efd8fb2157478` into `.parity-reference`. The test runs the
+candidate separately, so its Python imports cannot accidentally resolve to the legacy integration.
+For a local run from this legacy checkout, fetch that commit from the fork into `.parity-reference`
+first. The exact revision matters when interpreting failures. [Reference candidate](https://github.com/Jackson-Devices/ha-nightscout-extended/commit/44f4e7c2809ee00d43a9642e875efd8fb2157478)
+
+For example, at 401 mg/dL the stock current-reading display prints `HIGH`. Compare the card text with that
+rendering, retain the numeric SGV and timestamp in the data comparison, and use the alarm plugin's own
+logic for any alarm comparison. The display label cannot establish a sensor limit. [Stock display](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/client/index.js#L518) · [Stock alarms](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/simplealarms.js#L39)
+
 ## Universal rules (U-1 to U-14)
 
 | ID | Rule | Pass condition (all must hold) |

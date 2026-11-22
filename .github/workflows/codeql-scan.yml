@@ -1,0 +1,41 @@
+name: CodeQL scan
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # The caller must be one of the two repository workflows that run preflight.
+    if: >-
+      ${{
+        startsWith(github.workflow_ref, format('{0}/.github/workflows/validate.yml@', github.repository)) ||
+        startsWith(github.workflow_ref, format('{0}/.github/workflows/codeql.yml@', github.repository))
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        # Scan the Python integration, bundled card and GitHub Actions workflows.
+        language: [python, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}

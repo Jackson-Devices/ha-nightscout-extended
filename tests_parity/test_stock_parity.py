@@ -1,7 +1,7 @@
 """Parity of the integration with a running, pinned stock Nightscout.
 
 Every expected value here comes from Nightscout: the stock server's own responses, JavaScript's own ``Number()``,
-or Nightscout's own display functions run from the container's source. A mismatch means the integration differs
+or Nightscout's own display functions and stylesheet served by the stock container. A mismatch means the integration differs
 from Nightscout. See CONTRIBUTING.md (U-4).
 """
 
@@ -80,15 +80,69 @@ def seeded(stock):
     )
 
     newest = readings[-1]["date"]
-    deadline = time.monotonic() + 150
-    while time.monotonic() < deadline:
-        bgnow = stock.get("/api/v2/properties/bgnow").get("bgnow") or {}
-        if bgnow.get("mills") == newest:
-            break
-        time.sleep(3)
-    else:
-        raise RuntimeError(f"Nightscout never reported the seeded reading in bgnow: {bgnow}")
+    _wait_for_bgnow(stock, lambda bgnow: bgnow.get("mills") == newest, "report the seeded reading")
     return {"now": now, "readings": readings}
+
+
+def _wait_for_bgnow(stock, matches, operation):
+    deadline = time.monotonic() + 150
+    while True:
+        bgnow = stock.get("/api/v2/properties/bgnow").get("bgnow") or {}
+        if matches(bgnow):
+            return bgnow
+        if time.monotonic() >= deadline:
+            pytest.fail(f"Nightscout did not {operation}: {bgnow}")
+        time.sleep(3)
+
+
+@pytest.fixture
+def invalid_latest_entry(stock, seeded):
+    """Wait for the exact CGM error in bgnow, then remove it through stock's HTTP storage path."""
+    baseline = seeded["readings"][-1]["date"]
+    baseline_bgnow = _wait_for_bgnow(stock, lambda bgnow: bgnow.get("mills") == baseline, "report the baseline")
+    [baseline_entry] = stock.get("/api/v1/entries.json?count=1")
+    assert baseline_entry["date"] == baseline
+
+    # Five minutes beyond the latest normal reading places the error in its own stock bucket.
+    newest = baseline + 5 * 60 * 1000
+    device = "parity-invalid-mmol"
+    case = {
+        "type": "sgv", "sgv": 10, "units": "mmol/L", "date": newest, "direction": "Flat", "device": device,
+        "dateString": _iso(datetime.fromtimestamp(newest / 1000, timezone.utc)),
+    }
+    query = urlencode({"find[date]": newest, "find[device]": device, "count": 2})
+    case_path = "/api/v1/entries.json?" + query
+
+    def entries_for_case():
+        entries = stock.get(case_path)
+        assert all(entry["device"] == device and entry["date"] == newest for entry in entries)
+        return entries
+
+    assert not entries_for_case(), "the invalid test entry was already present"
+
+    try:
+        stock.post("/api/v1/entries", [case])
+        [written] = entries_for_case()
+        [latest] = stock.get("/api/v1/entries.json?count=1")
+        assert latest["_id"] == written["_id"]
+        assert written["sgv"] == case["sgv"] and written["units"] == case["units"]
+        yield _wait_for_bgnow(
+            stock,
+            lambda bgnow: any(
+                error.get("mills") == newest and error.get("mgdl") == case["sgv"]
+                for error in bgnow.get("errors", [])
+            ),
+            "report the exact newest entry as a CGM error",
+        )
+    finally:
+        for entry in entries_for_case():
+            entry_id = entry["_id"]
+            assert re.fullmatch("[0-9a-fA-F]{24}", entry_id), "stock did not return a MongoDB entry ID"
+            stock.delete(f"/api/v1/entries/{entry_id}")
+        assert not entries_for_case(), "the invalid test entry survived cleanup"
+        [restored] = stock.get("/api/v1/entries.json?count=1")
+        assert restored["_id"] == baseline_entry["_id"], "stock latest raw entry was not restored"
+        _wait_for_bgnow(stock, lambda bgnow: bgnow == baseline_bgnow, "restore bgnow after the invalid case")
 
 
 async def _setup(hass: HomeAssistant, stock) -> MockConfigEntry:
@@ -186,15 +240,28 @@ async def test_glucose_change_trend_and_time_match_bgnow(hass: HomeAssistant, st
     assert not mismatches, report(mismatches)
 
 
-async def test_treatment_amounts_match_javascript(stock, seeded):
-    """Nightscout's plugins read an amount as present when it's truthy, with the value `Number(raw)`."""
+@pytest.fixture
+def stock_treatments(stock, seeded):
     now = seeded["now"]
     start, end = now - timedelta(days=1), now + timedelta(hours=1)
     raw = stock.get_raw("/api/v1/treatments.json?" + urlencode({
         "find[created_at][$gte]": _iso(start), "find[created_at][$lte]": _iso(end), "count": "1000",
     })).decode()
-    oracle = {row["id"]: row for row in node(HERE / "js" / "js_number.mjs", {"raw": raw, "fields": ["carbs", "insulin"]})}
+    rows = json.loads(raw)
+    expected_notes = {f"parity-{index}" for index in range(len(AMOUNTS))} | {"parity-missing"}
+    observed_notes = [row.get("notes") for row in rows if row.get("enteredBy") == "parity"]
+    assert set(observed_notes) == expected_notes and len(observed_notes) == len(expected_notes), (
+        "stock did not return each seeded treatment exactly once"
+    )
+    oracle = node(HERE / "js" / "js_number.mjs", {"raw": raw, "fields": ["carbs", "insulin"]})
+    by_id = {row["id"]: row for row in oracle}
+    assert len(by_id) == len(rows) and all(row["_id"] in by_id for row in rows)
+    return start, end, rows, by_id
 
+
+async def test_treatment_amounts_match_javascript(stock, stock_treatments):
+    """Nightscout's plugins read an amount as present when it's truthy, with the value `Number(raw)`."""
+    start, end, _, oracle = stock_treatments
     async with aiohttp.ClientSession() as session:
         client = NightscoutClient(session, BASE_URL, stock.secret)
         client.set_uses_api_secret(True)
@@ -223,52 +290,113 @@ async def test_treatment_amounts_match_javascript(stock, seeded):
     assert not mismatches, report(mismatches)
 
 
-async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seeded, native_lib):
-    """For every reading from 40 to 450 mg/dL, the card's number and colour class match Nightscout's display.
+async def test_last_treatment_entities_match_stock_amounts(hass: HomeAssistant, stock, seeded, stock_treatments):
+    """Read the actual HA intake sensors, including the identity metadata shown with the amount."""
+    _, _, rows, oracle = stock_treatments
+    await _setup(hass, stock)
+    mismatches = []
+    for field, unit in (("carbs", "g"), ("insulin", "U")):
+        candidates = []
+        for row in rows:
+            value = oracle[row["_id"]][field]
+            if not value["truthy"] or isinstance(value["number"], str) or value["number"] == 0:
+                continue
+            when = datetime.fromisoformat(row["created_at"])
+            if when <= seeded["now"]:
+                candidates.append((when, row, value["number"]))
+        assert candidates, f"stock provided no finite nonzero {field} amount"
+        when, latest, expected = max(candidates, key=lambda case: case[0])
+        state = hass.states.get(f"sensor.parity_last_{field}")
+        assert state is not None, f"last {field} sensor missing"
+        expected_attributes = {"time": when.isoformat(), "event_type": latest["eventType"],
+                               "notes": latest["notes"], "unit_of_measurement": unit}
+        actual_attributes = {key: state.attributes.get(key) for key in expected_attributes}
+        try:
+            value_matches = float(state.state) == pytest.approx(float(expected))
+        except ValueError:
+            value_matches = False
+        if not value_matches or actual_attributes != expected_attributes:
+            mismatches.append({"what": f"last {field} sensor", "expected": expected, "integration": state.state,
+                               "stock_attributes": expected_attributes, "integration_attributes": actual_attributes})
+    assert not mismatches, report(mismatches)
 
-    Each case is real integration output: the reading is pushed through the integration's coordinator and the
-    resulting Home Assistant states are given to the card.
-    """
-    settings = stock.get("/api/v1/status.json")["settings"]
+
+async def _render_card_cases(hass, stock, seeded, readings):
     entry = await _setup(hass, stock)
     coordinator = entry.runtime_data
-    now = datetime.now(timezone.utc)
-
-    readings = list(range(40, 451))
+    now = seeded["now"].replace(hour=12, minute=0, second=0)
     cases = []
     for mgdl in readings:
         coordinator.async_set_updated_data(
             dataclasses.replace(coordinator.data, glucose=float(mgdl), glucose_time=now)
         )
         await hass.async_block_till_done()
-        cases.append({
-            "glucose": hass.states.get("sensor.parity_glucose").as_dict(),
-            "last": hass.states.get("sensor.parity_last_reading").as_dict(),
-        })
+        glucose = hass.states.get("sensor.parity_glucose")
+        last = hass.states.get("sensor.parity_last_reading")
+        assert glucose is not None and last is not None, "card requires the integration's glucose and timestamp entities"
+        assert datetime.fromisoformat(last.state) == now, "the card received the previous reading's timestamp"
+        cases.append({"glucose": glucose.as_dict(), "last": last.as_dict()})
+    return node(HERE / "js" / "card_render.mjs", {"card": str(CARD), "now": now.isoformat(), "cases": cases})
 
-    shown = node(HERE / "js" / "card_render.mjs", {"card": str(CARD), "now": now.isoformat(), "cases": cases})
-    native = node(HERE / "js" / "native_display.mjs", {
+
+def _native_display(stock, native_lib, readings, *, paint=False):
+    settings = stock.get("/api/v1/status.json")["settings"]
+    payload = {
         "lib": str(native_lib),
-        "settings": {"units": settings["units"], "thresholds": settings["thresholds"], "theme": settings.get("theme")},
+        "settings": {"units": settings["units"], "thresholds": settings["thresholds"], "theme": settings["theme"]},
         "cases": readings,
-    })
+    }
+    if paint:
+        payload["css"] = stock.get_raw("/css/main.css").decode("utf-8")
+    return node(HERE / "js" / "native_display.mjs", payload)
 
-    level_to_class = {"urgent_low": "urgent", "urgent_high": "urgent", "low": "warning", "high": "warning",
-                      "in_range": "inrange"}
+
+def _css_colour(value):
+    """Normalize the pinned stylesheet and card's CSS colour spellings."""
+    if value is None:
+        return None
+    value = value.strip().lower()
+    names = {"black": "#000000", "red": "#ff0000", "white": "#ffffff", "yellow": "#ffff00"}
+    if re.fullmatch(r"#[0-9a-f]{3}", value):
+        return "#" + "".join(digit * 2 for digit in value[1:])
+    return names.get(value, value)
+
+
+async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seeded, native_lib):
+    """Compare text and both rendered colours from 40 to 450 mg/dL in the default daytime card configuration."""
+    readings = list(range(40, 451))
+    shown = await _render_card_cases(hass, stock, seeded, readings)
+    native = _native_display(stock, native_lib, readings, paint=True)
+
     approved = approved_exceptions()
     mismatches = []
     for mgdl, card, ns in zip(readings, shown, native, strict=True):
+        assert ns["mgdl"] == mgdl, "stock display returned a different case"
         if card["text"] != ns["text"]:
             mismatches.append({"mgdl": mgdl, "what": "number", "nightscout": ns["text"], "card": card["text"]})
-        card_class = level_to_class.get(card["level"], card["level"])
-        if card_class != ns["cls"]:
-            if ns["cls"] == "" and "E-1c" not in approved:
-                mismatches.append({"mgdl": mgdl, "what": "colour where Nightscout shows none",
-                                   "theme": settings.get("theme"), "card": card["level"],
+        expected = {name: _css_colour(colour) for name, colour in ns["paint"].items()}
+        actual = {name: _css_colour(colour) for name, colour in card["paint"].items()}
+        if actual == expected:
+            continue
+        if not ns["rangeClass"]:
+            if "E-1c" not in approved:
+                mismatches.append({"mgdl": mgdl, "what": "no-range paint", "nightscout": expected, "card": actual,
                                    "needs_owner_approval": "E-1c"})
-            elif ns["cls"] != "":
-                mismatches.append({"mgdl": mgdl, "what": "colour class", "nightscout": ns["cls"],
-                                   "card": card["level"]})
+        else:
+            mismatches.append({"mgdl": mgdl, "what": "range paint", "range": ns["rangeClass"],
+                               "nightscout": expected, "card": actual})
+    assert not mismatches, report(mismatches)
+
+
+async def test_card_display_limits_match_nightscout(hass: HomeAssistant, stock, seeded, native_lib):
+    """Compare the presentation boundaries without using range colour or alarm expectations."""
+    readings = [39, 40, 400, 401]
+    shown = await _render_card_cases(hass, stock, seeded, readings)
+    native = _native_display(stock, native_lib, readings)
+    mismatches = [
+        {"mgdl": mgdl, "what": "display limit", "nightscout": ns["text"], "card": card["text"]}
+        for mgdl, card, ns in zip(readings, shown, native, strict=True) if card["text"] != ns["text"]
+    ]
     assert not mismatches, report(mismatches)
 
 
@@ -291,39 +419,15 @@ async def test_card_change_text_matches_nightscout(hass: HomeAssistant, stock, s
     }])
 
 
-async def test_newest_entry_labelled_mmol_is_not_a_reading(hass: HomeAssistant, stock, seeded):
-    """Nightscout reads every entry as `mgdl: Number(sgv)` and ignores `units` (lib/data/dataloader.js).
+async def test_newest_entry_labelled_mmol_is_not_a_reading(hass: HomeAssistant, stock, invalid_latest_entry):
+    """A raw 10 mg/dL CGM error cannot become a 10 mmol/L Home Assistant reading."""
+    bgnow = invalid_latest_entry
+    assert bgnow.get("last") is None, f"stock's bucket containing the CGM error reported a glucose reading: {bgnow}"
 
-    A newest entry of `{sgv: 10, units: "mmol/L"}` is therefore a 10 mg/dL CGM error code, and bgnow reports no
-    current reading. The integration must show exactly what bgnow shows. This test runs last in the file because
-    it changes the server's current reading.
-    """
-    newest = int((datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp() * 1000)
-    stock.post("/api/v1/entries", [{
-        "type": "sgv", "sgv": 10, "units": "mmol/L", "date": newest, "direction": "Flat", "device": "parity",
-        "dateString": _iso(datetime.fromtimestamp(newest / 1000, timezone.utc)),
-    }])
-    deadline = time.monotonic() + 150
-    while time.monotonic() < deadline:
-        entries = stock.get("/api/v1/entries.json?count=1")
-        bgnow = stock.get("/api/v2/properties/bgnow").get("bgnow") or {}
-        if entries and entries[0].get("date") == newest and bgnow.get("mills") != seeded["readings"][-1]["date"]:
-            break
-        time.sleep(3)
-    else:
-        raise RuntimeError(f"Nightscout never processed the newest mmol-labelled entry: {bgnow}")
-
-    unit = _ha_unit(stock.get("/api/v1/status.json")["settings"]["units"])
-    to_unit = BloodGlucoseConcentrationConverter.converter_factory(MGDL, unit)
     await _setup(hass, stock)
-    state = hass.states.get("sensor.parity_glucose").state
-    last = bgnow.get("last")
-    if last is None:
-        assert state in ("unknown", "unavailable"), report([{
-            "what": "newest mmol-labelled entry", "stock_bgnow": bgnow, "integration": state,
-            "note": "Nightscout shows no current reading here; the integration shows one",
-        }])
-    else:
-        assert float(state) == pytest.approx(to_unit(float(last))), report([{
-            "what": "newest mmol-labelled entry", "stock_bgnow_last": last, "integration": state,
-        }])
+    state = hass.states.get("sensor.parity_glucose")
+    assert state is not None, "glucose sensor missing"
+    assert state.state in ("unknown", "unavailable"), report([{
+        "what": "newest mmol-labelled entry", "stock_bgnow": bgnow, "integration": state.state,
+        "note": "Nightscout shows no current reading here; the integration shows one",
+    }])

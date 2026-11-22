@@ -1,0 +1,5 @@
+# Used standalone by preflight and alongside tests_ha/requirements.txt by the live suite.
+pytest==9.0.3
+openapi-schema-validator==0.6.3
+jsonschema==4.25.1
+referencing==0.37.0
