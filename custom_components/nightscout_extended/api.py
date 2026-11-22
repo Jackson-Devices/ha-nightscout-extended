@@ -234,14 +234,12 @@ def _parse_time(item: dict[str, Any]) -> datetime | None:
     return _ms_to_dt(item.get("mills") or item.get("date"))
 
 
-def _make_treatment(
-    item: dict[str, Any], uid: str | None, when: datetime, *, strict_numbers: bool = False,
-) -> Treatment:
+def _make_treatment(item: dict[str, Any], uid: str | None, when: datetime) -> Treatment:
     def number(name: str) -> float | None:
         value = item.get(name)
-        if strict_numbers and type(value) not in (int, float):
+        if type(value) not in (int, float):
             return None
-        return _num(value) or None
+        return _num(value)
 
     notes = item.get("notes")
     return Treatment(
@@ -395,7 +393,7 @@ def _merge_v3_treatments(
     for uid, row in _current_treatment_rows(rows):
         when = _ms_to_dt(row.get("date")) or _parse_iso(row.get("created_at")) or _ms_to_dt(row.get("mills"))
         if when is not None and start <= when < end:
-            treatments.append(_make_treatment(row, uid, when, strict_numbers=True))
+            treatments.append(_make_treatment(row, uid, when))
     treatments.sort(key=lambda treatment: treatment.time)
     return treatments
 
