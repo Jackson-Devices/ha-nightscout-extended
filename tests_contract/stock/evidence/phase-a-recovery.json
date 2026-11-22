@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "kind": "unchanged-product-recovery",
+  "verifier": "Independent normal Codex Cloud",
+  "harness": "4ad5a799f6eeb538e981b1343697019e8285eee6",
+  "product": "01ebf02d5bcc0275412e457f0f4c2821d14ea67b",
+  "upstream": "a8acabe41d6380f6647f9863c37bc9d776ffc9cc",
+  "only_repaired_harness_paths": [
+    "tests_contract/stock/ha_probe.py",
+    "tests_contract/stock/three_way.py"
+  ],
+  "native": {
+    "observed_at_utc": "2026-11-22T13:44:00Z",
+    "effective_permission_checks_per_context": 35,
+    "equivalent": true,
+    "snapshot_stable": true,
+    "disposable_resources_left": 0,
+    "latest_mgdl": 180,
+    "source_time_utc": "2026-11-22T13:43:00Z",
+    "delta_mgdl": 12,
+    "forecast_mgdl": [
+      199,
+      204
+    ],
+    "candidate_forecast_targets_utc": [
+      "2026-11-22T13:58:02Z",
+      "2026-11-22T14:13:02Z"
+    ],
+    "reservoir_units": 0,
+    "contact_utc": "2026-11-22T13:42:00Z",
+    "sensor_insulin_cannula_battery_age_hours": [
+      20,
+      40,
+      60,
+      96
+    ],
+    "literal_treatment_number_violations": 26
+  },
+  "ha_stock_profiles": [
+    {
+      "mode": "upstream_legacy",
+      "exit": 1,
+      "hash_matched_modules": 9,
+      "http_200_requests": 4,
+      "missed_event": {
+        "name": "Temp Basal",
+        "start_utc": "2026-11-22T12:14:00Z",
+        "end_utc": "2026-11-22T12:44:00Z"
+      }
+    },
+    {
+      "mode": "candidate_legacy",
+      "exit": 0,
+      "hash_matched_modules": 12,
+      "http_200_requests": 6,
+      "calendar_events": 3
+    },
+    {
+      "mode": "candidate_v3",
+      "exit": 0,
+      "hash_matched_modules": 12,
+      "http_200_requests": 10,
+      "calendar_events": 3
+    }
+  ],
+  "three_way_synthetic": {
+    "columns": [
+      "scene",
+      "mode",
+      "result",
+      "raw_entries_http",
+      "glucose_mgdl",
+      "last_reading",
+      "delta_mgdl"
+    ],
+    "rows": [
+      [
+        "aligned",
+        "upstream_legacy",
+        "pass",
+        null,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "aligned",
+        "candidate_legacy",
+        "pass",
+        200,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "aligned",
+        "candidate_legacy_denied",
+        "pass",
+        403,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "aligned",
+        "candidate_v3",
+        "pass",
+        200,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "newer_raw",
+        "upstream_legacy",
+        "pass",
+        null,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "newer_raw",
+        "candidate_legacy",
+        "mismatch",
+        200,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "newer_raw",
+        "candidate_legacy_denied",
+        "pass",
+        403,
+        153,
+        "12:00:00",
+        7
+      ],
+      [
+        "newer_raw",
+        "candidate_v3",
+        "pass",
+        200,
+        162,
+        "12:07:00",
+        "unknown"
+      ]
+    ],
+    "expected_for_newer_raw_positive_legacy": {
+      "glucose_mgdl": 162,
+      "last_reading": "12:07:00",
+      "delta_mgdl": "unknown"
+    },
+    "harness_errors": 0
+  },
+  "receipt_sha256": {
+    "stock": "3eaae123055a11c8f4dbab0695a8ae6f802911f3a17b8e63f255aa43d8f29a04",
+    "three_way": "fa36b3dbbda27ca077ac5bcff3ac71be471a54042eb86a87385066b580ef23f1",
+    "combined": "ef4c6d54a4cef103fb9d87ddc768058b9b19e6d7ad954149f34c94c78dbc8622"
+  }
+}

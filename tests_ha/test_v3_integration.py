@@ -1,7 +1,6 @@
 """Exercise Nightscout protocol selection through real Home Assistant entry setup."""
 
 from datetime import datetime
-from hashlib import sha1
 import re
 from time import time
 
@@ -23,7 +22,9 @@ from custom_components.nightscout_extended.const import CONF_USE_API_SECRET, DOM
 URL = "https://parity.example.invalid"
 TOKEN = "fixture-subject"
 BEARER = "fixture-bearer"
-SECRET = "fixture-site-secret"
+# RFC 3174 section 7.3 TEST1 (https://www.rfc-editor.org/rfc/rfc3174#section-7.3).
+LEGACY_WIRE_INPUT = "abc"
+LEGACY_WIRE_SHA1 = "a9993e364706816aba3e25717850c26c9cd0d89d"
 VERSION = "/api/v3/version"
 EXCHANGE = f"/api/v2/authorization/request/{TOKEN}"
 ENTRIES_V1 = "/api/v1/entries.json"
@@ -39,6 +40,8 @@ READING = "2026-01-08T12:00:00+00:00"
 V3_READING = "2026-01-08T12:07:00+00:00"
 EARLY = "2026-01-08T12:10:00+00:00"
 AFTERNOON = "2026-01-08T17:00:00+00:00"
+AFTERNOON_READING = "2026-01-08T16:55:00+00:00"
+AFTERNOON_FORECAST = (("2026-01-08T17:10:02+00:00", 207), ("2026-01-08T17:25:02+00:00", 231))
 CALENDAR = "calendar.parity_site_treatments"
 FORECAST = (("2026-01-08T12:15:02+00:00", 207), ("2026-01-08T12:30:02+00:00", 231))
 
@@ -149,6 +152,7 @@ def _mock_v3_sgv(mocker, entries, *, deleted=()):
 def _mock_site(
     mocker: AiohttpClientMocker, *, v3=False, v3_reading=READING, v3_glucose=153,
     forecast=FORECAST, treatments=LEGACY_TREATMENTS, reservoir=(), reservoir_status=200,
+    reading=READING,
 ):
     """Install responses at the HTTP boundary of HA's existing aiohttp fixture."""
     mocker.clear_requests()
@@ -156,7 +160,7 @@ def _mock_site(
         f"{URL}/api/v1/status.json",
         json={"version": "15.0.9", "settings": {"customTitle": "Parity Site", "units": "mg/dl"}},
     )
-    bgnow = {"last": 153, "mills": _ms(READING)}
+    bgnow = {"last": 153, "mills": _ms(reading)}
     mocker.get(f"{URL}/api/v2/properties/bgnow", json={"bgnow": bgnow})
     props = {
         "bgnow": bgnow,
@@ -316,7 +320,7 @@ async def _refresh(hass, entry):
     assert entry.runtime_data.last_update_success
 
 
-def _assert_snapshot(hass):
+def _assert_snapshot(hass, *, reading):
     glucose = _state(hass, "glucose")
     assert glucose.attributes["unit_of_measurement"] == "mg/dL"
     assert glucose.attributes["direction"] == "FortyFiveUp"
@@ -333,7 +337,7 @@ def _assert_snapshot(hass):
         )
     } == {
         "glucose": "153", "glucose_change": "7", "glucose_trend": "forty_five_up",
-        "last_reading": READING, "insulin_on_board": "1.35", "carbs_on_board": "28.9",
+        "last_reading": reading, "insulin_on_board": "1.35", "carbs_on_board": "28.9",
         "last_carbs": "30", "last_insulin": "0.5",
         "forecast_in_15_minutes": "207", "forecast_in_30_minutes": "231",
     }
@@ -378,10 +382,10 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
 ):
     """A server upgrade changes the wire paths while an existing HA entry keeps its identity."""
     freezer.move_to(AFTERNOON)
-    _mock_site(aioclient_mock)
+    _mock_site(aioclient_mock, reading=AFTERNOON_READING, forecast=AFTERNOON_FORECAST)
     entry = await _configure(hass)
     try:
-        _assert_snapshot(hass)
+        _assert_snapshot(hass, reading=AFTERNOON_READING)
         await _assert_calendar_range(hass, entry)
         _assert_wire_mode(aioclient_mock, v3=False, token=TOKEN, discovery=True)
         ids = _entity_ids(hass, entry)
@@ -404,12 +408,15 @@ async def test_reload_uses_v3_with_stable_entities_and_calendar(
         }
         device_id = _device_id(hass, entry)
 
-        _mock_site(aioclient_mock, v3=True)
+        _mock_site(
+            aioclient_mock, v3=True, reading=AFTERNOON_READING,
+            v3_reading=AFTERNOON_READING, forecast=AFTERNOON_FORECAST,
+        )
         assert await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
         assert entry.state is config_entries.ConfigEntryState.LOADED
         _assert_wire_mode(aioclient_mock, v3=True, token=TOKEN, discovery=True, bootstrap=True)
-        _assert_snapshot(hass)
+        _assert_snapshot(hass, reading=AFTERNOON_READING)
         aioclient_mock.mock_calls.clear()
         await _assert_calendar_range(hass, entry)
         calendar_calls = aioclient_mock.mock_calls
@@ -582,7 +589,7 @@ async def test_calendar_reads_authoritative_overlaps_and_preserves_cached_fallba
 async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer
 ):
-    """V3 SGV and wall-clock age do not change the v2 forecast anchor or mask missing data."""
+    """Use the v2 forecast anchor and keep the original curve after the scalars expire."""
     freezer.move_to(EARLY)
     _mock_site(aioclient_mock, v3=True, v3_reading=V3_READING, v3_glucose=162)
     entry = await _configure(hass)
@@ -601,11 +608,6 @@ async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
             {"time": "2026-01-08T12:30:02+00:00", "mgdl": 231},
         ]
 
-        freezer.move_to(AFTERNOON)
-        await _refresh(hass, entry)
-        assert _state(hass, "forecast_in_15_minutes").state == "207"
-        assert _state(hass, "forecast_in_30_minutes").state == "231"
-
         for points, expected in (
             (FORECAST[:1], ("207", STATE_UNKNOWN)),
             (FORECAST[1:], (STATE_UNKNOWN, "231")),
@@ -621,19 +623,31 @@ async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
                 _state(hass, "forecast_in_30_minutes").state,
             ) == expected
         assert _state(hass, "forecast_in_30_minutes").attributes["forecast"] == []
+
+        freezer.move_to(AFTERNOON)
+        _mock_site(aioclient_mock, v3=True, v3_reading=V3_READING, v3_glucose=162)
+        await _refresh(hass, entry)
+        assert _state(hass, "glucose").state == STATE_UNKNOWN
+        assert _state(hass, "last_reading").state == V3_READING
+        for horizon, (target, _) in zip((15, 30), FORECAST, strict=True):
+            expired = _state(hass, f"forecast_in_{horizon}_minutes")
+            assert expired.state == STATE_UNKNOWN
+            assert expired.attributes["source_time"] == READING
+            assert expired.attributes["forecast_time"] == target
+        assert _state(hass, "forecast_in_30_minutes").attributes["forecast"] == forecast_30.attributes["forecast"]
     finally:
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 @pytest.mark.parametrize(
-    ("credential", "uses_secret"), [(None, False), (SECRET, True)], ids=["public", "stored-api-secret"],
+    ("credential", "uses_secret"), [(None, False), (LEGACY_WIRE_INPUT, True)], ids=["public", "stored-api-secret"],
 )
 async def test_public_and_stored_secret_entries_keep_legacy_reads(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer, credential, uses_secret
 ):
     """Existing public and explicitly configured secret entries work without v3 discovery."""
     freezer.move_to(AFTERNOON)
-    _mock_site(aioclient_mock)
+    _mock_site(aioclient_mock, reading=AFTERNOON_READING, forecast=AFTERNOON_FORECAST)
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id=URL,
@@ -644,9 +658,9 @@ async def test_public_and_stored_secret_entries_keep_legacy_reads(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     try:
-        _assert_snapshot(hass)
+        _assert_snapshot(hass, reading=AFTERNOON_READING)
         _assert_wire_mode(
-            aioclient_mock, v3=False, secret=sha1(SECRET.encode()).hexdigest() if uses_secret else None,
+            aioclient_mock, v3=False, secret=LEGACY_WIRE_SHA1 if uses_secret else None,
         )
         assert VERSION not in {url.path for _, url, _, _ in aioclient_mock.mock_calls}
     finally:

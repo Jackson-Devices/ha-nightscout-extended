@@ -1,9 +1,9 @@
 """Parsing and auth tests. They load api.py directly, so Home Assistant isn't needed."""
 
 import asyncio
-import hashlib
 import importlib.util
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -120,6 +120,7 @@ def test_malformed_forecast_points_keep_usable_siblings_and_independent_horizons
 
 
 SECRET = "averylongapisecret"
+
 # RFC 3174 section 7.3 TEST1 (https://www.rfc-editor.org/rfc/rfc3174#section-7.3).
 LEGACY_WIRE_INPUT = "abc"
 LEGACY_WIRE_SHA1 = "a9993e364706816aba3e25717850c26c9cd0d89d"
@@ -493,7 +494,7 @@ def test_v3_glucose_in_mmol_rows_normalizes_to_native_mgdl_and_keeps_matching_de
     fixture = _V3Fixture()
     fixture.entry_rows = [{
         "type": "sgv", "date": PROPS["bgnow"]["mills"],
-        "sgv": 155 * api.MMOL_PER_MGDL, "units": "mmol/L",
+        "sgv": 155 * api.MMOL_PER_MGDL, "units": "mmol/L", "direction": "FortyFiveUp",
     }]
     _, result = asyncio.run(_v3_server(fixture.handle, _configured_data))
     assert result.glucose == pytest.approx(155)
@@ -556,7 +557,7 @@ def test_v3_corroborated_sgv_just_ahead_of_local_clock(monkeypatch, offset_ms, a
     assert data.glucose_time == (measured if accepted else None)
     assert data.glucose == (155 if accepted else None)
     assert data.delta == (6 if accepted else None)
-    assert data.direction == ("FortyFiveUp" if accepted else None)
+    assert data.direction == ("SingleDown" if accepted else None)
     assert data.forecast_at(15).mgdl == 169
     assert data.forecast_at(30).mgdl == 175
 
@@ -648,14 +649,15 @@ def test_secret_classification_retries_when_only_protected_legacy_read_denies_qu
         if request.path == "/api/v1/status.json":
             return web.json_response({"settings": {}})
         assert request.path.startswith("/api/v2/properties/")
-        digest = hashlib.sha1(SECRET.encode()).hexdigest()
-        return web.json_response(PROPS) if request.headers.get("api-secret") == digest else web.Response(status=401)
+        if request.headers.get("api-secret") == LEGACY_WIRE_SHA1:
+            return web.json_response(PROPS)
+        return web.Response(status=401)
 
     async def exercise(client):
         await client.async_get_status()
         assert client.uses_api_secret
 
-    asyncio.run(_v3_server(handle, exercise, SECRET))
+    asyncio.run(_v3_server(handle, exercise, LEGACY_WIRE_INPUT))
 
 
 @pytest.mark.parametrize("status", [401, 403, 503])
@@ -775,26 +777,43 @@ def test_v3_treatments_never_return_a_partial_later_page(failure):
 
 def test_v3_exchange_redirect_never_follows_or_surfaces_credential_path():
     fixture = _V3Fixture()
-    seen = []
+    escaped_subject = quote(_V3_SUBJECT, safe="")
+    sink_path = f"{_EXCHANGE}{escaped_subject}"
+    sink_hits = 0
 
-    async def foreign(request):
-        seen.append(True)
-        return web.json_response({})
+    async def go():
+        async def count_hit(_request):
+            nonlocal sink_hits
+            sink_hits += 1
+            return web.json_response({})
 
-    async def exercise_foreign(foreign_client):
-        async def handle(request):
-            if request.path.startswith(_EXCHANGE):
-                raise web.HTTPFound(f"{foreign_client.url}{request.raw_path}")
-            return await fixture.handle(request)
+        sink = web.Application()
+        sink.router.add_get("/{tail:.*}", count_hit)
+        sink_runner = web.AppRunner(sink, access_log=None)
+        await sink_runner.setup()
+        try:
+            sink_site = web.TCPSite(sink_runner, "127.0.0.1", 0)
+            await sink_site.start()
+            sink_port = sink_runner.addresses[0][1]
+            location = f"http://127.0.0.1:{sink_port}{sink_path}"
 
-        async def exercise_source(client):
-            await client.async_get_status()
+            async def handle(request):
+                if request.path.startswith(_EXCHANGE):
+                    raise web.HTTPFound(location)
+                return await fixture.handle(request)
 
-        with pytest.raises(api.NightscoutConnectionError, match="authorization exchange.*redirected") as err:
-            await _v3_server(handle, exercise_source)
-        message = str(err.value)
-        assert bool(_V3_SUBJECT not in message and quote(_V3_SUBJECT, safe="") not in message)
-        assert _EXCHANGE not in message
+            async def exercise_source(client):
+                await client.async_get_status()
 
-    asyncio.run(_v3_server(foreign, exercise_foreign))
-    assert seen == []
+            with pytest.raises(api.NightscoutConnectionError) as err:
+                await _v3_server(handle, exercise_source, _V3_SUBJECT)
+            message = str(err.value)
+            if not re.search("authorization exchange.*redirected", message):
+                raise AssertionError("The expected redirect refusal was not reported.")
+            if any(value in message for value in (_V3_SUBJECT, escaped_subject, _EXCHANGE)):
+                raise AssertionError("The redirect error exposed the exchange path or credential.")
+        finally:
+            await sink_runner.cleanup()
+
+    asyncio.run(go())
+    assert sink_hits == 0

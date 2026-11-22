@@ -7,7 +7,9 @@ from pathlib import Path
 from homeassistant.const import CONF_API_KEY, CONF_URL, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
 from custom_components.nightscout_extended.api import NightscoutClient
 from custom_components.nightscout_extended.const import DOMAIN
@@ -23,10 +25,16 @@ async def test_insulin_age_manifest_and_warm_availability(
     hass: HomeAssistant, aioclient_mock, freezer, monkeypatch,
 ):
     freezer.move_to(NOW)
+
+    async def fresh_properties(method, url, _data):
+        # Keep the independent glucose read current as the treatment clock advances.
+        bgnow = {**PROPS["bgnow"], "mills": int(dt_util.utcnow().timestamp() * 1000)}
+        return AiohttpClientMockResponse(method, url, status=200, json={**PROPS, "bgnow": bgnow})
+
     aioclient_mock.get(f"{URL}/api/v1/status.json", json={"settings": {"units": "mg/dl"}})
-    aioclient_mock.get(f"{URL}/api/v2/properties/bgnow", json=PROPS)
+    aioclient_mock.get(f"{URL}/api/v2/properties/bgnow", side_effect=fresh_properties)
     aioclient_mock.get(
-        f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", json=PROPS,
+        f"{URL}/api/v2/properties/bgnow,delta,direction,iob,cob,ar2,basal", side_effect=fresh_properties,
     )
     aioclient_mock.get(f"{URL}/api/v1/entries.json", json=[])
     aioclient_mock.get(f"{URL}/api/v1/devicestatus/", json=[])

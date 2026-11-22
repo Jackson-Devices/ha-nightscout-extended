@@ -8,7 +8,13 @@ import pytest
 from aiohttp import ClientConnectionError
 from homeassistant import config_entries
 from homeassistant.bootstrap import async_load_base_functionality
-from homeassistant.const import CONF_API_KEY, CONF_URL, EVENT_HOMEASSISTANT_FINAL_WRITE, STATE_UNKNOWN
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_URL,
+    EVENT_HOMEASSISTANT_FINAL_WRITE,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import Context, CoreState, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ServiceValidationError, Unauthorized
@@ -61,6 +67,10 @@ class _Nightscout:
         self.v3 = v3
         self.docs = {}
         self.bgnow = {}
+        self.status_settings = {}
+        self.calculations = {}
+        self.duplicate_sgvs = set()
+        self.raw_batches = []
         self.offline = False
         self.fail_search_through = None
         self.fail_history_continuation = False
@@ -110,7 +120,19 @@ class _Nightscout:
             and (low is None or row["date"] >= _query_time(low))
             and (high is None or row["date"] < _query_time(high))
         ]
-        return sorted(rows, key=lambda row: (row["date"], row["_id"]), reverse=descending)[start:start + count]
+        ordered = sorted(rows, key=lambda row: (row["date"], row["_id"]), reverse=descending)
+        return self._duplicate_rows(ordered)[start:start + count]
+
+    def _duplicate_rows(self, rows):
+        result = []
+        for row in rows:
+            result.append(row)
+            if row.get("identifier", row["_id"]) in self.duplicate_sgvs:
+                result.append(row.copy())
+        return result
+
+    def _record_raw(self, path, rows):
+        self.raw_batches.append((path, [(row["date"], row["sgv"], row["srvModified"]) for row in rows]))
 
     async def _answer(self, method, url, _data):
         self.requests.append((url.path, dict(url.query)))
@@ -123,9 +145,12 @@ class _Nightscout:
             return AiohttpClientMockResponse(method, url, json=result, status=status)
 
         if url.path == "/api/v1/status.json":
-            return reply({"version": "15.0.9", "settings": {"units": "mg/dl", "customTitle": self.name}})
-        if url.path in {"/api/v2/properties/bgnow", PROPERTIES}:
+            settings = {"units": "mg/dl", "customTitle": self.name, **self.status_settings}
+            return reply({"version": "15.0.9", "settings": settings})
+        if url.path == "/api/v2/properties/bgnow":
             return reply({"bgnow": self.bgnow})
+        if url.path == PROPERTIES:
+            return reply({"bgnow": self.bgnow, **self.calculations})
         if url.path == "/api/v3/version":
             if not self.v3:
                 return reply({}, status=404)
@@ -147,9 +172,11 @@ class _Nightscout:
                 return reply({}, status=503)
             limit = int(url.query.get("limit", 1000))
             rows = (row for row in self.docs.values() if row["srvModified"] > cursor)
-            page = sorted(rows, key=lambda row: row["srvModified"])[:limit]
+            ordered = sorted(rows, key=lambda row: row["srvModified"])
+            page = self._duplicate_rows(ordered)[:limit]
             if self.fail_history_continuation and len(page) == limit:
                 self._first_full_history_cursor = cursor
+            self._record_raw(url.path, page)
             return reply(page, v3=True)
         if url.path in {ENTRIES, LEGACY_ENTRIES}:
             if (
@@ -157,7 +184,9 @@ class _Nightscout:
                 and _query_time(url.query["date$gte"]) <= self.fail_search_through
             ):
                 return reply({}, status=503)
-            return reply(self._search_rows(url), v3=self.v3)
+            rows = self._search_rows(url)
+            self._record_raw(url.path, rows)
+            return reply(rows, v3=self.v3)
         if url.path in {"/api/v1/devicestatus/", "/api/v3/devicestatus"}:
             return reply([], v3=url.path == "/api/v3/devicestatus")
         if url.path in {"/api/v1/treatments.json", "/api/v3/treatments"}:
@@ -210,8 +239,8 @@ def _assert_rows(reply, rows, *, status="complete", missing=()):
 def _current(hass, entry, value, when):
     assert hass.states.get(_entity(hass, entry)).state == value
     actual = hass.states.get(_entity(hass, entry, "last_reading")).state
-    if when == STATE_UNKNOWN:
-        assert actual == STATE_UNKNOWN
+    if when in {STATE_UNKNOWN, STATE_UNAVAILABLE}:
+        assert actual == when
     else:
         # HA's timestamp device class serializes its state to whole seconds.
         assert actual == datetime.fromisoformat(when).isoformat(timespec="seconds")
@@ -219,6 +248,7 @@ def _current(hass, entry, value, when):
 
 async def _tick(hass, freezer, site):
     site.requests.clear()
+    site.raw_batches.clear()
     freezer.tick(timedelta(seconds=61))
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
@@ -305,6 +335,103 @@ async def test_scheduled_polls_materialize_every_sgv_and_apply_source_mutations(
         _assert_rows(await _history(hass, entry), [*samples[:2], _sample("tie-a", corrected, 123), latest])
         _current(hass, entry, "124", LATEST)
         _assert_rows(await _history(hass, entry, end=LATEST), [*samples[:2], _sample("tie-a", corrected, 123)])
+    finally:
+        await _unload(hass, entry)
+
+
+@pytest.mark.parametrize("v3", [False, True], ids=["legacy", "v3"])
+async def test_scheduled_timeline_preserves_source_times_and_public_history(
+    hass: HomeAssistant, aioclient_mock, freezer, v3,
+):
+    freezer.move_to(NOW)
+    site = _Nightscout(aioclient_mock, v3=v3)
+    first = "2026-01-08T12:10:00+00:00"
+    same_value_later = "2026-01-08T12:13:30+00:00"
+    late = "2026-01-08T12:09:20+00:00"
+    other_late = "2026-01-08T12:12:00+00:00"
+    recovered = "2026-01-08T12:16:30+00:00"
+    site.put("first", first, 124, direction="Flat", modified=EARLY_STAMP)
+    site.bgnow = {"last": 124, "mills": _ms(first)}
+    entry = await _configure(hass, site)
+
+    async def assert_timeline(readings):
+        # Keep the requested end inside the latest successful poll's coverage.
+        end = datetime.fromisoformat(readings[-1][0]) + timedelta(milliseconds=1)
+        requests = len(site.requests)
+        result = await _history(hass, entry, end=end.isoformat())
+        assert (result["status"], result["missing_ranges"]) == ("complete", [])
+        assert [(row["date"], row["sgv"]) for row in result["readings"]] == [
+            (_ms(when), value) for when, value in readings
+        ]
+        assert len(site.requests) == requests
+
+    def raw_rows():
+        return [
+            row for path, rows in site.raw_batches
+            if (path.startswith(HISTORY) if v3 else path == LEGACY_ENTRIES)
+            for row in rows
+        ]
+
+    try:
+        expected = [(first, 124)]
+        _current(hass, entry, "124", first)
+        await assert_timeline(expected)
+
+        # No writes since bootstrap. An empty versioned change feed and an
+        # unchanged legacy snapshot both leave the same source sample current.
+        await _tick(hass, freezer, site)
+        assert entry.runtime_data.last_update_success
+        assert raw_rows() == ([] if v3 else [(_ms(first), 124, _ms(EARLY_STAMP))])
+        _current(hass, entry, "124", first)
+        await assert_timeline(expected)
+
+        # A storage-side rewrite of the same measurement, then an exact raw
+        # replay, are distinct from a new measurement.
+        rewritten = site.put("first", first, 124, direction="Flat")
+        await _tick(hass, freezer, site)
+        first_batch = raw_rows()
+        assert first_batch == [(_ms(first), 124, rewritten)]
+        _current(hass, entry, "124", first)
+        await assert_timeline(expected)
+        await _tick(hass, freezer, site)
+        assert raw_rows() == first_batch
+        assert entry.runtime_data.last_update_success
+        _current(hass, entry, "124", first)
+        await assert_timeline(expected)
+
+        site.put("same-value-later", same_value_later, 124, direction="Flat")
+        site.bgnow = {"last": 124, "mills": _ms(same_value_later)}
+        await _tick(hass, freezer, site)
+        expected = [*expected, (same_value_later, 124)]
+        _current(hass, entry, "124", same_value_later)
+        await assert_timeline(expected)
+
+        # Upload the later-measured backfill first. The raw feed also repeats
+        # an exact document within this batch.
+        site.put("other-late", other_late, 137)
+        late_write = site.put("late", late, 111)
+        site.duplicate_sgvs.add("late")
+        await _tick(hass, freezer, site)
+        assert raw_rows().count((_ms(late), 111, late_write)) == 2
+        expected = [(late, 111), expected[0], (other_late, 137), expected[1]]
+        _current(hass, entry, "124", same_value_later)
+        await assert_timeline(expected)
+
+        site.offline = True
+        await _tick(hass, freezer, site)
+        assert not entry.runtime_data.last_update_success
+        assert entry.state is config_entries.ConfigEntryState.LOADED
+        _current(hass, entry, STATE_UNAVAILABLE, STATE_UNAVAILABLE)
+        await assert_timeline(expected)
+
+        site.offline = False
+        site.duplicate_sgvs.clear()
+        site.put("recovered", recovered, 131)
+        site.bgnow = {"last": 131, "mills": _ms(recovered)}
+        await _tick(hass, freezer, site)
+        assert entry.runtime_data.last_update_success
+        _current(hass, entry, "131", recovered)
+        await assert_timeline([*expected, (recovered, 131)])
     finally:
         await _unload(hass, entry)
 

@@ -139,7 +139,7 @@ def _assert_reading_and_calculations(hass, glucose, measured_at):
     assert _state(hass, "carbs_on_board").attributes["source"] == "fixture-meal"
 
 
-def _assert_forecasts(hass, source_time, first, second):
+def _assert_forecasts(hass, source_time, first, second, *, expired=False):
     for horizon, point in ((15, first), (30, second)):
         state = _state(hass, f"forecast_in_{horizon}_minutes")
         assert state.attributes["source_time"] == source_time
@@ -148,7 +148,7 @@ def _assert_forecasts(hass, source_time, first, second):
             assert state.attributes["forecast_time"] is None
         else:
             when, glucose = point
-            assert state.state == str(glucose)
+            assert state.state == (STATE_UNKNOWN if expired else str(glucose))
             assert state.attributes["forecast_time"] == when
 
 
@@ -183,12 +183,6 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
         _assert_forecasts(hass, READING, *FIRST_FORECAST)
         assert await _calendar_range(hass) == []
 
-        # A repeated reading and curve retain their source times after both horizons pass.
-        freezer.move_to("2026-01-08T12:35:00+00:00")
-        await _refresh(hass, entry)
-        _assert_reading_and_calculations(hass, "153", READING)
-        _assert_forecasts(hass, READING, *FIRST_FORECAST)
-
         for curve, expected in (
             (_curve(FIRST_FORECAST[0], ("2026-01-08T12:34:01+00:00", 249)), (FIRST_FORECAST[0], None)),
             (_curve(None, FIRST_FORECAST[1]), (None, FIRST_FORECAST[1])),
@@ -200,13 +194,20 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
             _assert_reading_and_calculations(hass, "153", READING)
             _assert_forecasts(hass, READING, *expected)
 
-        # Nothing was written since the full refresh at 12:35. Two no-change
-        # ticks retain the known sample even though Nightscout has no HISTORY rows.
+        # A successful response with the same old reading and curve cannot
+        # refresh either clock. The site still reports the original sample.
+        freezer.move_to("2026-01-08T12:35:00+00:00")
+        _snapshot(aioclient_mock, v3=v3, ar2=base_curve)
+        await _refresh(hass, entry)
+        _assert_reading_and_calculations(hass, STATE_UNKNOWN, READING)
+        _assert_forecasts(hass, READING, *FIRST_FORECAST, expired=True)
+
+        # The versioned change feed is quiet at this observation time.
         _snapshot(aioclient_mock, v3=v3)
         for _ in range(2):
             aioclient_mock.mock_calls.clear()
             await _refresh(hass, entry)
-            _assert_reading_and_calculations(hass, "153", READING)
+            _assert_reading_and_calculations(hass, STATE_UNKNOWN, READING)
             _assert_forecasts(hass, READING, None, None)
             if v3:
                 series_calls = [
@@ -263,8 +264,8 @@ async def test_same_entry_recovers_from_missing_data_outage_and_late_uploads(
         assert coordinator.last_update_success
         assert entry.runtime_data is coordinator
         _assert_wire_mode(aioclient_mock, v3=v3, token=TOKEN)
-        _assert_reading_and_calculations(hass, "153", READING)
-        _assert_forecasts(hass, READING, *FIRST_FORECAST)
+        _assert_reading_and_calculations(hass, STATE_UNKNOWN, READING)
+        _assert_forecasts(hass, READING, *FIRST_FORECAST, expired=True)
 
         freezer.move_to("2026-01-08T12:41:00+00:00")
         latest = (NEW_READING, 166)
