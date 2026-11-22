@@ -206,6 +206,7 @@ async def test_glucose_sensors_expose_canonical_mgdl_and_source_time(
     assert glucose.attributes["native_mgdl"] == 180
     assert glucose.attributes["source_time"] == "2026-01-01T13:00:00+00:00"
     assert hass.states.get("sensor.ns_glucose_change").attributes["native_mgdl"] == 9.5
+    assert hass.states.get("sensor.ns_forecast_in_15_minutes").attributes["native_mgdl"] == 169
     assert hass.states.get("sensor.ns_forecast_in_30_minutes").attributes["native_mgdl"] == 180.5
 
 

@@ -143,6 +143,19 @@ test("glucose source timestamp controls rendered age before lagging last-reading
   assert.equal(el.wrap.style["--ngc-bg"], "#3d9a5b");
 });
 
+test("cached primary glucose and invalid source time fall back through live HA entities", () => {
+  const el = renderCard({
+    glucose: sensor("180", "mg/dL", {
+      thresholds_mgdl: T,
+      source_time: "not-a-timestamp",
+    }),
+    last: "2026-01-01T12:02:00Z",
+    now: "2026-01-01T12:05:00Z",
+  });
+  assert.equal(el.wrap.style["--ngc-bg"], "#3d9a5b");
+  assert.equal(el.age.textContent, "3 min ago");
+});
+
 test("mixed-unit siblings render from canonical mg/dL in the primary display unit", () => {
   const mgdl = renderCard({
     glucose: glucose("180", "mg/dL", 180),
