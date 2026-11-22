@@ -1,7 +1,6 @@
 """Exercise Nightscout protocol selection through real Home Assistant entry setup."""
 
 from datetime import datetime
-from hashlib import sha1
 import re
 from time import time
 
@@ -23,7 +22,9 @@ from custom_components.nightscout_extended.const import CONF_USE_API_SECRET, DOM
 URL = "https://parity.example.invalid"
 TOKEN = "fixture-subject"
 BEARER = "fixture-bearer"
-SECRET = "fixture-site-secret"
+# RFC 3174 section 7.3 TEST1 (https://www.rfc-editor.org/rfc/rfc3174#section-7.3).
+LEGACY_WIRE_INPUT = "abc"
+LEGACY_WIRE_SHA1 = "a9993e364706816aba3e25717850c26c9cd0d89d"
 VERSION = "/api/v3/version"
 EXCHANGE = f"/api/v2/authorization/request/{TOKEN}"
 ENTRIES_V1 = "/api/v1/entries.json"
@@ -639,7 +640,7 @@ async def test_forecasts_keep_v2_anchor_and_update_each_horizon(
 
 
 @pytest.mark.parametrize(
-    ("credential", "uses_secret"), [(None, False), (SECRET, True)], ids=["public", "stored-api-secret"],
+    ("credential", "uses_secret"), [(None, False), (LEGACY_WIRE_INPUT, True)], ids=["public", "stored-api-secret"],
 )
 async def test_public_and_stored_secret_entries_keep_legacy_reads(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, freezer, credential, uses_secret
@@ -659,7 +660,7 @@ async def test_public_and_stored_secret_entries_keep_legacy_reads(
     try:
         _assert_snapshot(hass, reading=AFTERNOON_READING)
         _assert_wire_mode(
-            aioclient_mock, v3=False, secret=sha1(SECRET.encode()).hexdigest() if uses_secret else None,
+            aioclient_mock, v3=False, secret=LEGACY_WIRE_SHA1 if uses_secret else None,
         )
         assert VERSION not in {url.path for _, url, _, _ in aioclient_mock.mock_calls}
     finally:
