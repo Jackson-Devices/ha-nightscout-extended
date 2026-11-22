@@ -61,7 +61,8 @@ async def test_config_flow_bad_auth(hass: HomeAssistant, aioclient_mock):
 
 
 @pytest.mark.parametrize(("units", "glucose", "unit"), [("mg/dl", "155", "mg/dL"), ("mmol", "8.6", "mmol/L")])
-async def test_sensors(hass: HomeAssistant, aioclient_mock, units, glucose, unit):
+async def test_sensors(hass: HomeAssistant, aioclient_mock, freezer, units, glucose, unit):
+    freezer.move_to("2026-01-01T13:01:00+00:00")
     _mock(aioclient_mock, status={"version": "15.0.9", "settings": {"units": units}})
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=URL, title="NS",
