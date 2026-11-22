@@ -179,7 +179,8 @@ async def _setup(hass: HomeAssistant, aioclient_mock, status=STATUS):
     return entry
 
 
-async def test_glucose_sensor_exposes_site_thresholds(hass: HomeAssistant, aioclient_mock):
+async def test_glucose_sensor_exposes_site_thresholds(hass: HomeAssistant, aioclient_mock, freezer):
+    freezer.move_to("2026-01-01T13:01:00+00:00")
     status = {"version": "15.0.9", "settings": {
         "units": "mg/dl",
         "thresholds": {"bgHigh": 250, "bgTargetTop": 170, "bgTargetBottom": 75, "bgLow": "bad"},
@@ -189,6 +190,7 @@ async def test_glucose_sensor_exposes_site_thresholds(hass: HomeAssistant, aiocl
     # bgLow is unusable, so Nightscout's default fills that one in.
     assert attrs["thresholds_mgdl"] == {"urgent_low": 55.0, "low": 75.0, "high": 170.0, "urgent_high": 250.0}
     assert attrs["direction"] == "FortyFiveUp"  # existing attributes are kept
+    assert hass.states.get("sensor.ns_last_reading").state == "2026-01-01T13:00:00+00:00"
 
 
 async def test_glucose_thresholds_default_when_status_has_none(hass: HomeAssistant, aioclient_mock):
