@@ -28,12 +28,13 @@ ROLE_KEYS = {
 }
 IDENTITY_ROLES = {"glucose", "latest_bolus", "latest_carbs", "calendar"}
 MAINTENANCE_ROLES = ("insulin_age", "site_age", "sensor_age", "battery_age")
+FORECAST_ROLES = ("forecast_15", "forecast_30")
 OPERATIONS = {
     "glucose": ("glucose",),
     "version": ("api_version",),
     "derived": ("iob", "cob", "basal", "site_settings"),
     "site": ("site_settings",),
-    "forecast": ("forecast_15", "forecast_30"),
+    "forecast": FORECAST_ROLES,
     "treatments": ("latest_bolus", "latest_carbs", "calendar"),
     "reservoir": ("insulin_remaining",),
     "recovery": ("glucose", "site_settings"),
@@ -264,6 +265,18 @@ class HomeAssistantObserver:
         if role in MAINTENANCE_ROLES:
             details = ("event_type",)
         return _sensor(state, row, attrs.get("time"), details)
+
+    def forecast_timestamps(self):
+        """Read timestamp attributes from both actual forecast states."""
+        observations = {}
+        for role in FORECAST_ROLES:
+            state = self._state(role)
+            observations[role] = None if state is None else {
+                key: state.attributes[key]
+                for key in ("source_time", "forecast_time")
+                if key in state.attributes
+            }
+        return observations
 
     async def observe(self, url, request):
         endpoint = urlsplit(url)
