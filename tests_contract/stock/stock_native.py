@@ -28,7 +28,7 @@ MAINTENANCE = {
 }
 COLLECTIONS = ("entries", "treatments", "devicestatus", "profile", "food", "settings")
 PROPERTIES = "/api/v2/properties/bgnow,delta,direction,iob,cob,basal,ar2"
-UPLOADER = "openaps://stock-parity-synthetic"
+UPLOADER = "stock-parity-pump"
 SGV_DEVICE = "stock-parity-cgm"
 QUANTITIES = ("carbs", "insulin", "duration", "rate", "absolute")
 V1_QUANTITY_SCHEMA = "lib/server/swagger.yaml#/components/schemas/Treatment"
