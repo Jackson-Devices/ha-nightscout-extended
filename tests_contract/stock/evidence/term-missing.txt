@@ -1,0 +1,18 @@
+Combined 2 files
+Name                                                   Stmts   Miss Branch BrPart  Cover   Missing
+--------------------------------------------------------------------------------------------------
+custom_components/nightscout_extended/__init__.py        103      8     24      4    91%   73->75, 77-78, 84, 87, 129-130, 143, 169
+custom_components/nightscout_extended/age.py              14      0      2      0   100%
+custom_components/nightscout_extended/api.py             580     25    216     24    94%   163-164, 228->234, 260, 304-305, 368, 447-448, 449->451, 454-455, 475, 486, 502, 505, 534, 543, 558->560, 564, 573, 613->600, 633, 662, 722, 780-781, 784, 792, 796->799
+custom_components/nightscout_extended/calendar.py         47      2      4      0    96%   24-25
+custom_components/nightscout_extended/card.py             19      0      2      0   100%
+custom_components/nightscout_extended/config_flow.py      75     13     18      1    81%   59-60, 68, 93, 96-108
+custom_components/nightscout_extended/const.py            11      0      0      0   100%
+custom_components/nightscout_extended/coordinator.py     198     14     66     10    91%   56, 61, 66-67, 76-77, 133->123, 187, 195-196, 232, 243, 267->270, 293, 300, 307
+custom_components/nightscout_extended/diagnostics.py      13      0      0      0   100%
+custom_components/nightscout_extended/entity.py            8      0      0      0   100%
+custom_components/nightscout_extended/sensor.py          134      2     36      2    98%   229, 283
+custom_components/nightscout_extended/sgv_history.py     408     50    134     32    84%   43, 76, 123, 126, 146, 153, 173, 194, 202, 211, 219->221, 235, 281-282, 298-301, 322, 328, 331, 333-334, 345->348, 363, 370, 374-375, 423, 426, 430, 442, 449, 469-471, 473, 482-493, 496, 508, 513-515, 538, 542->529, 553, 583-585, 591
+custom_components/nightscout_extended/sgv_source.py      287     31    148     30    86%   87, 104-106, 113, 117, 120, 122, 156, 160, 170, 192, 204, 218, 224, 238, 249, 268, 298, 308, 315, 319, 349, 352, 365, 393, 402, 409, 427, 429, 433
+--------------------------------------------------------------------------------------------------
+TOTAL                                                   1897    145    650    103    90%
