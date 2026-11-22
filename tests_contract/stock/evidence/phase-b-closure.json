@@ -1,0 +1,157 @@
+{
+  "format": 1,
+  "phase": "independent-closure",
+  "tested_refs": {
+    "calendar": "d9e50d78b0eefb607a68ca213615cd431259b185",
+    "component_tree": "c5402deaed17b3425b3f767202c3761b6f90d48b",
+    "main": "a8acabe41d6380f6647f9863c37bc9d776ffc9cc",
+    "measured_product": "c8a6832499290a65329767d3e4a0615efaf94bbc",
+    "measured_qa": "e46f55df3482f3d19ac7c74df8ac78c63e6153ff",
+    "product": "8f52b18cb3e2c3a924722d18bb26706c3441d3e2",
+    "qa": "0c1319185b88df00f06a9c20252701f196c9361a",
+    "quantity": "06a1fad1a7d7c89a7ff824170d1757595cc73066"
+  },
+  "original_cloud_receipt_sha256": "ceb78545cb3680c8aed24cfde06da87f615c154a20ff201593f56116854e8e58",
+  "independent_witness_sha256": "5c083e145f7621275956397bb83ca4ae5454fcc86394654b3df90c9a0b4a55a4",
+  "independent_witness_encoding": "ASCII compact JSON and LF",
+  "batch_wall_seconds": 32.753,
+  "changed_gates": "pass",
+  "global_stock_openapi_gate": "fail",
+  "historical_frozen_gate": "fail",
+  "coverage": {
+    "exit": 0,
+    "statements": {
+      "covered": 1752,
+      "total": 1897,
+      "percent": 92.36
+    },
+    "branches": {
+      "covered": 537,
+      "total": 650,
+      "percent": 82.62
+    },
+    "files_sha256": {
+      "json": "09c8e040a88f146694aa7291a2f0e08e6a0b9dbadfac23f4d42bd7da51cb23c2",
+      "term_missing": "3d2299f826e7dfe090f6b4a6c9c4014e1cb6b84e40d395673021a6949bc96475"
+    },
+    "important_missing": [
+      [
+        "api.py",
+        25,
+        24
+      ],
+      [
+        "coordinator.py",
+        14,
+        10
+      ],
+      [
+        "sensor.py",
+        2,
+        2
+      ],
+      [
+        "sgv_history.py",
+        50,
+        36
+      ]
+    ],
+    "columns": [
+      "module",
+      "uncovered_statements",
+      "uncovered_branches"
+    ]
+  },
+  "tests": {
+    "api": {
+      "passed": 197,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "xpassed": 0,
+      "errors": 0,
+      "deselected": 0
+    },
+    "home_assistant": {
+      "passed": 87,
+      "failed": 0,
+      "skipped": 0,
+      "xfailed": 0,
+      "xpassed": 0,
+      "errors": 0,
+      "deselected": 0,
+      "threshold_clock_regression_executed": true
+    },
+    "card": {
+      "passed": 16,
+      "identical_input_from_phase_b": true
+    },
+    "supplemental_integrated": {
+      "passed": 16,
+      "includes_late_calendar_fault": true,
+      "independent_negative_controls": 2
+    },
+    "separate_forecast_observer_policy": {
+      "passed": 6,
+      "source": "phase B"
+    },
+    "swagger_controls": {
+      "passed": 7,
+      "identical_inputs_from_phase_b": true
+    },
+    "controlled_matrix": {
+      "passed": 8,
+      "identical_inputs_from_phase_b": true
+    },
+    "frozen_raw": {
+      "passed": 1,
+      "case_mismatches": 12,
+      "field_difference_count": 69,
+      "harness_errors": 0
+    },
+    "h1_controls_exit_codes": [
+      0,
+      1,
+      1,
+      2
+    ]
+  },
+  "corrected_legacy_projection": {
+    "at": "2026-01-08T12:00:00Z",
+    "directions": [
+      "SingleUp",
+      "SingleUp",
+      "SingleDown",
+      "SingleUp",
+      "SingleUp",
+      "SingleUp",
+      "SingleUp"
+    ],
+    "native_delta_mgdl": [
+      17,
+      17,
+      -17,
+      null,
+      10,
+      null,
+      0
+    ]
+  },
+  "combined_legacy_pull_requests": {
+    "merge_tree_exit": 0,
+    "tree": "c94a370f16039208cd4dda7dd8b038d5e7b930b0",
+    "extracted_files_matching": 36,
+    "api_passed": 53,
+    "ha_passed": 16,
+    "wire_regressions": 41
+  },
+  "qualified_code_custody": {
+    "full_product_files_matching_qa": 56,
+    "changed_product_paths_since_real_stock_run": [
+      "README.md",
+      "tests_ha/test_integration.py"
+    ],
+    "unchanged_frozen_files": 5,
+    "measured_component_tree": "c5402deaed17b3425b3f767202c3761b6f90d48b"
+  }
+}
