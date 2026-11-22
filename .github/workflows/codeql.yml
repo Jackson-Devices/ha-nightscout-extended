@@ -14,6 +14,7 @@ permissions: {}
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    # Off while GitHub-managed default setup is on; see docs/code-scanning.md.
     if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
