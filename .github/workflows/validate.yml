@@ -2,41 +2,83 @@ name: Validate
 
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'SECURITY.md'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'SECURITY.md'
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  preflight:
+    uses: ./.github/workflows/workflow-lint.yml
+
   hassfest:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Pinned to a release tag so Dependabot can update it. The action runs the untagged
+      # ghcr.io/home-assistant/hassfest image, so the code that runs still changes over time.
       - uses: home-assistant/actions/hassfest@07f46fd2e19967768b5fd3000f91f857452b767c # 2026.11.0
 
   hacs:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      # Pinned to a release tag so Dependabot can update it (its action.yml is identical to main's).
+      # The action runs the ghcr.io/hacs/action:main image, so the code that runs still changes over time.
       - uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
         with:
           category: integration
+          comment: false
 
   tests:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           prune-cache: true
-      - run: uv run --python 3.13 --with pytest --with aiohttp pytest tests -q
+      - run: uv run --python 3.13 --with-requirements tests/requirements.txt pytest tests -q
 
   tests-card:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
@@ -44,10 +86,25 @@ jobs:
       - run: node --test tests_js/*.test.mjs
 
   tests-ha:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           prune-cache: true
-      - run: uv run --python 3.14 --with pytest-homeassistant-custom-component pytest tests_ha -q -c tests_ha/pytest.ini -p no:cacheprovider
+      - run: uv run --python 3.14 --with-requirements tests_ha/requirements.txt pytest tests_ha -q -c tests_ha/pytest.ini -p no:cacheprovider
+
+  codeql:
+    needs: preflight
+    if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft')) }}
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+    with:
+      preflight_passed: true

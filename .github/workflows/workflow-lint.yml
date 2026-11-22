@@ -1,17 +1,7 @@
 name: Workflow lint
 
 on:
-  push:
-    branches: ['**']
-    paths:
-      - '.github/workflows/*.yml'
-      - '.github/workflows/*.yaml'
-      - '.github/scripts/*.sh'
-  pull_request:
-    paths:
-      - '.github/workflows/*.yml'
-      - '.github/workflows/*.yaml'
-      - '.github/scripts/*.sh'
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -25,6 +15,19 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: ''
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check Python and card syntax
+        shell: bash
+        run: |
+          python -m compileall -q custom_components/nightscout_extended tests tests_ha
+          node --check custom_components/nightscout_extended/www/nightscout-glucose-card.js
       - name: Lint workflows and changelog script
         shell: bash
         run: |

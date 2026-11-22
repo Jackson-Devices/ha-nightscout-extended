@@ -1,27 +1,47 @@
 name: CodeQL (advanced opt-in)
 
 on:
-  push:
-    branches: [main]
-  # Include pull requests against intermediate branches in a stack.
-  pull_request:
-  schedule:
-    - cron: "17 4 * * 3"
+  workflow_call:
+    inputs:
+      preflight_passed:
+        description: A successful preflight for this commit already ran in the caller.
+        type: boolean
+        default: false
   workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ inputs.preflight_passed && github.run_id || github.ref }}
+  cancel-in-progress: true
 
 permissions: {}
 
 jobs:
+  preflight:
+    # The input is only available for workflow_call. A direct dispatch runs its own preflight.
+    if: ${{ !inputs.preflight_passed }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-lint.yml
+
   analyze:
     name: Analyze (${{ matrix.language }})
     # Off while GitHub-managed default setup is on; see docs/code-scanning.md.
-    if: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
+    needs: preflight
+    # The caller already waited for its preflight. Allow only that intentional skip.
+    if: >-
+      ${{
+        !cancelled() && vars.CODEQL_ADVANCED_ENABLED == 'true' &&
+        ((inputs.preflight_passed && needs.preflight.result == 'skipped') ||
+         (!inputs.preflight_passed && needs.preflight.result == 'success'))
+      }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       security-events: write
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         # Scan the Python integration, bundled card and GitHub Actions workflows.
         language: [python, javascript-typescript, actions]
