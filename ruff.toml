@@ -1,0 +1,6 @@
+# Lint run by Validate's lint job after preflight. Errors only: pyflakes (F) and pycodestyle errors/warnings (E, W).
+line-length = 120
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "W"]

@@ -1,0 +1,98 @@
+name: Parity
+
+# Called by Validate after preflight passes; a red preflight stops this before any server starts.
+# Native: a pinned stock Nightscout. Current: the checked-out code, which gates the merge.
+# Legacy: the upstream integration at the fork point, run against the same stock site for the three-way report
+# only. Its differences from Nightscout are a record for the upstream developer and never fail this job.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  stock:
+    name: stock (${{ matrix.site }})
+    if: >-
+      ${{
+        startsWith(github.workflow_ref, format('{0}/.github/workflows/validate.yml@', github.repository))
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        site: [mgdl-default, mgdl-custom, mmol-custom]
+    env:
+      # Upstream aperetti/ha-nightscout-extended main at the fork point (Adam Peretti, 2026-11-21).
+      LEGACY_SHA: a8acabe41d6380f6647f9863c37bc9d776ffc9cc
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Check out the legacy integration
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: a8acabe41d6380f6647f9863c37bc9d776ffc9cc
+          path: .parity-legacy
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          prune-cache: true
+
+      - name: Prepare parity dependencies
+        run: |
+          uv venv --python 3.14 "$RUNNER_TEMP/parity-venv"
+          uv pip install --python "$RUNNER_TEMP/parity-venv/bin/python" \
+            -r tests_ha/requirements.txt -r tests_parity/requirements.txt
+
+      - name: Start stock Nightscout (${{ matrix.site }})
+        id: stock_start
+        run: tests_parity/stock.sh start "${{ matrix.site }}"
+
+      - name: Current product against native (gate)
+        run: |
+          set +e
+          PARITY_SUBJECT=current PARITY_REPORT="$RUNNER_TEMP/parity-report/current.json" \
+            "$RUNNER_TEMP/parity-venv/bin/python" -m pytest tests_parity --ignore=tests_parity/test_stock_contract.py \
+            -c tests_parity/pytest.ini -p no:cacheprovider --show-capture=no --tb=short -v
+          echo "$?" > "$RUNNER_TEMP/current-exit"
+
+      - name: Start a clean site for the legacy product
+        id: legacy_site
+        run: tests_parity/stock.sh start "${{ matrix.site }}"
+
+      - name: Legacy product against native (report only)
+        run: |
+          test "$(git -C .parity-legacy rev-parse HEAD)" = "$LEGACY_SHA"
+          rm -rf .parity-legacy/tests_parity
+          cp -R tests_parity .parity-legacy/
+          cd .parity-legacy
+          PARITY_SUBJECT=legacy PARITY_REPORT="$RUNNER_TEMP/parity-report/legacy.json" \
+            "$RUNNER_TEMP/parity-venv/bin/python" -m pytest tests_parity --ignore=tests_parity/test_stock_contract.py \
+            -c tests_parity/pytest.ini -p no:cacheprovider --show-capture=no --tb=line -q \
+            || echo "Legacy differs from native; see the three-way report."
+
+      - name: Three-way report
+        run: |
+          python3 tests_parity/three_way_report.py "$RUNNER_TEMP/parity-report/current.json" \
+            "$RUNNER_TEMP/parity-report/legacy.json" tests_parity/exceptions.json \
+            > "$RUNNER_TEMP/parity-report/three-way-${{ matrix.site }}.md"
+          cat "$RUNNER_TEMP/parity-report/three-way-${{ matrix.site }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: parity-${{ matrix.site }}
+          path: ${{ runner.temp }}/parity-report/
+          retention-days: 30
+
+      - name: Gate on the current product
+        run: exit "$(cat "$RUNNER_TEMP/current-exit")"
+
+      - name: Stop stock Nightscout
+        if: ${{ always() && steps.stock_start.outcome != 'skipped' && steps.stock_start.outcome != '' }}
+        run: tests_parity/stock.sh stop

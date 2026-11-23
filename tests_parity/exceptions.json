@@ -1,0 +1,33 @@
+{
+  "_comment": "Divergences from stock Nightscout decided by the repository owner (CONTRIBUTING.md, U-8). Every entry links the PR comment recording the decision. 'approved' entries relax only their own documented default-configuration comparison. 'approved_opt_in' entries are allowed only behind a non-default option and never relax a default-configuration comparison. 'rejected' entries record divergences the owner refused.",
+  "approved": {
+    "E-1d": {
+      "decision": "At 39 mg/dL and above 400 mg/dL the card shows the number in the site unit instead of Nightscout's fixed LOW/HIGH display text; alarm state is shown in a separate badge computed by Nightscout's simplealarms rule from the site's alarm levels.",
+      "approval": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7097425189"
+    }
+  },
+  "approved_opt_in": {
+    "E-1b": {
+      "decision": "Card colour modes three, five, custom_three and custom_five paint with palettes other than the site's Nightscout theme.",
+      "approval": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7086580376"
+    },
+    "E-1c": {
+      "decision": "Those modes may colour readings where the site's theme shows no range colour.",
+      "approval": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7086580376"
+    },
+    "E-1e": {
+      "decision": "Home Assistant options may override each alarm threshold in mg/dL; with no override the site's served thresholds are used.",
+      "approval": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7097425189"
+    }
+  },
+  "rejected": {
+    "E-4a": {
+      "decision": "Blanking a stale glucose reading to unknown. Parity applies: keep the value and expose its age.",
+      "approval": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/4#issuecomment-7086577773"
+    },
+    "E-5a": {
+      "decision": "Calendar look-back beyond Nightscout's 12-hour margin.",
+      "approval": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/5#issuecomment-7086150826"
+    }
+  }
+}

@@ -145,11 +145,13 @@ async def test_calendar_trigger_fires_before_planned_meal(hass: HomeAssistant, a
     await hass.async_block_till_done()
 
     for minute in ("17:20", "17:40", "17:49"):
-        freezer.move_to(f"2026-01-01T{minute}:00+00:00"); async_fire_time_changed(hass, dt_util.utcnow())
+        freezer.move_to(f"2026-01-01T{minute}:00+00:00")
+        async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done()
     assert calls == []  # not yet
 
-    freezer.move_to("2026-01-01T17:50:05+00:00"); async_fire_time_changed(hass, dt_util.utcnow())
+    freezer.move_to("2026-01-01T17:50:05+00:00")
+    async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     assert len(calls) == 1
     assert calls[0].data["message"].startswith("Planned meal: Dinner")
