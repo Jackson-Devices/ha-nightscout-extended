@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import timedelta
+from math import isfinite
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -45,20 +47,30 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
 
         Nightscout reports them in mg/dL whatever the display unit; its defaults fill gaps.
         """
-        raw = (self.status.get("settings") or {}).get("thresholds") or {}
         out = dict(DEFAULT_THRESHOLDS_MGDL)
-        for key, ns_key in (
-            ("urgent_low", "bgLow"),
-            ("low", "bgTargetBottom"),
-            ("high", "bgTargetTop"),
-            ("urgent_high", "bgHigh"),
+        settings = self.status.get("settings")
+        thresholds = settings.get("thresholds") if isinstance(settings, Mapping) else None
+        if not isinstance(thresholds, Mapping):
+            return out
+
+        # Stock Nightscout uses camelCase. The v1 schema documents snake_case.
+        for key, native_key, documented_key in (
+            ("urgent_low", "bgLow", "bg_low"),
+            ("low", "bgTargetBottom", "bg_target_bottom"),
+            ("high", "bgTargetTop", "bg_target_top"),
+            ("urgent_high", "bgHigh", "bg_high"),
         ):
-            try:
-                value = float(raw[ns_key])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if value > 0:
-                out[key] = value
+            for spelling in (native_key, documented_key):
+                raw_value = thresholds.get(spelling)
+                if isinstance(raw_value, bool):
+                    continue
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if isfinite(value) and value > 0:
+                    out[key] = value
+                    break
         return out
 
     async def _async_update_data(self) -> NightscoutData:
