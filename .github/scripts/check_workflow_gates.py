@@ -13,9 +13,7 @@ LINT = "./.github/workflows/workflow-lint.yml"
 SCAN = "./.github/workflows/codeql-scan.yml"
 PARITY = "./.github/workflows/parity.yml"
 SUCCESS = "needs.preflight.result == 'success'"
-READY = "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft'))"
 OPT_IN = "vars.CODEQL_ADVANCED_ENABLED == 'true'"
-DOC_PATHS = ["docs/**", "README.md", "CHANGELOG.md", "SECURITY.md"]
 READ = {"contents": "read"}
 SECURITY_WRITE = {**READ, "security-events": "write"}
 KNOWN_VALIDATE_JOBS = {"preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha", "codeql"}
@@ -116,7 +114,8 @@ def check_entry_jobs(name, jobs, has_parity, error):
             continue
         if job.get("needs") not in ("preflight", ["preflight"]):
             error(f"{job_id} must directly need preflight")
-        condition = SUCCESS + (f" && {READY}" if name == "validate.yml" else "")
+        # Every job runs on every push and pull request once preflight passes: no path or draft skips.
+        condition = SUCCESS
         is_scan = (name, job_id) in {("validate.yml", "codeql"), ("codeql.yml", "scan")}
         if is_scan:
             condition += f" && {OPT_IN}"
@@ -143,11 +142,8 @@ def validate(root):
     errors = []
     triggers = {
         "validate.yml": {
-            "push": {"branches": ["main"], "paths-ignore": DOC_PATHS},
-            "pull_request": {
-                "types": ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"],
-                "paths-ignore": DOC_PATHS,
-            },
+            "push": {"branches": ["main"]},
+            "pull_request": {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
             "schedule": [{"cron": "0 6 * * 1"}],
             "workflow_dispatch": None,
         },

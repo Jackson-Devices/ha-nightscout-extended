@@ -1,4 +1,2 @@
-__pycache__/
-*.pyc
-.venv/
-.pytest_cache/
+# Legacy checkout used by the Parity workflow and local three-way runs
+.parity-legacy/

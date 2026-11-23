@@ -24,7 +24,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.nightscout_extended.api import NightscoutClient
 from custom_components.nightscout_extended.const import CONF_USE_API_SECRET, DOMAIN
 
-from .conftest import BASE_URL, HERE, ROOT, approved_exceptions, node, report
+from .conftest import BASE_URL, HERE, ROOT, approved_exceptions, node, note_exception, report
 
 MGDL = UnitOfBloodGlucoseConcentration.MILLIGRAMS_PER_DECILITER
 MMOL = UnitOfBloodGlucoseConcentration.MILLIMOLE_PER_LITER
@@ -386,6 +386,8 @@ def _compare_current_text(mgdl, card, ns, approved):
         if "E-1d" not in approved:
             return {"mgdl": mgdl, "what": "numeric presentation", "needs_owner_approval": "E-1d"}
         expected = ns["numericText"]
+        if card["text"] == expected:
+            note_exception("E-1d", {"mgdl": mgdl, "nightscout": ns["text"], "current": card["text"]})
     else:
         expected = ns["text"]
     if card["text"] != expected:
@@ -393,7 +395,6 @@ def _compare_current_text(mgdl, card, ns, approved):
     return None
 
 
-@pytest.mark.corrected_product
 async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seeded, native_lib):
     """Compare text and both rendered colours from 40 to 450 mg/dL in the default daytime card configuration."""
     readings = list(range(40, 451))
@@ -420,7 +421,6 @@ async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seed
     assert not mismatches, report(mismatches)
 
 
-@pytest.mark.corrected_product
 async def test_card_display_limits_match_nightscout(hass: HomeAssistant, stock, seeded, native_lib):
     """Compare the presentation boundaries without using range colour or alarm expectations."""
     readings = [39, 40, 400, 401]
@@ -435,7 +435,6 @@ async def test_card_display_limits_match_nightscout(hass: HomeAssistant, stock, 
     assert not mismatches, report(mismatches)
 
 
-@pytest.mark.corrected_product
 async def test_latest_unusable_stock_row_suppresses_older_alarm(hass: HomeAssistant, stock, seeded, native_lib):
     """Use the latest numeric 39 in HA even when stock bgnow omits it from last."""
     query = urlencode({"find[device]": "parity-alarm-latest", "count": 10})
@@ -453,7 +452,7 @@ async def test_latest_unusable_stock_row_suppresses_older_alarm(hass: HomeAssist
         _wait_for_bgnow(stock, lambda bg: bg.get("mills") == sources[0]["date"], "report the alarm sample")
         entry = await _setup(hass, stock, options={"alarm_high_mgdl": 120})
         before = hass.states.get("sensor.parity_glucose")
-        assert before is not None and "simple_alarm" in before.attributes, "corrected alarm capability is missing"
+        assert before is not None and "simple_alarm" in before.attributes, "the product under test has no alarm capability"
 
         stock.post("/api/v1/entries", [sources[1]])
         bgnow = _wait_for_bgnow(

@@ -129,12 +129,71 @@ def node(script: Path, payload) -> object:
     return json.loads(result.stdout)
 
 
-def approved_exceptions() -> dict[str, str]:
+def approved_exceptions() -> dict[str, dict]:
+    """Owner-approved exceptions that relax a default-configuration comparison (CONTRIBUTING.md, U-8)."""
     return json.loads((HERE / "exceptions.json").read_text())["approved"]
 
 
+# ---- three-way report -------------------------------------------------------
+#
+# With PARITY_REPORT set, every test's outcome, every mismatch it found and every owner-approved exception it
+# relied on are written to that JSON file. tests_parity/three_way_report.py compares the current product's
+# report with the legacy (upstream) product's report on the same stock site.
+
+_RESULTS: dict[str, dict] = {}
+_ACTIVE: dict[str, str | None] = {"nodeid": None}
+_RANK = {"passed": 0, "skipped": 1, "failed": 2}
+
+
+def _entry(nodeid: str | None) -> dict:
+    return _RESULTS.setdefault(nodeid or "<session>", {
+        "outcome": "passed", "message": "", "mismatches": [], "exceptions": [],
+    })
+
+
+def pytest_runtest_setup(item):
+    _ACTIVE["nodeid"] = item.nodeid
+    _entry(item.nodeid)
+
+
+def pytest_runtest_logreport(report):
+    entry = _entry(report.nodeid)
+    outcome = "failed" if report.failed else "skipped" if report.skipped else "passed"
+    if _RANK[outcome] > _RANK[entry["outcome"]]:
+        entry["outcome"] = outcome
+        crash = getattr(getattr(report, "longrepr", None), "reprcrash", None)
+        if crash is not None and getattr(crash, "message", ""):
+            text = crash.message
+        elif isinstance(report.longrepr, tuple):  # skip: (path, line, reason)
+            text = str(report.longrepr[-1])
+        else:
+            text = report.longreprtext if hasattr(report, "longreprtext") else str(report.longrepr or "")
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        entry["message"] = first[:400]
+
+
+def pytest_sessionfinish(session, exitstatus):
+    target = os.environ.get("PARITY_REPORT")
+    if not target:
+        return
+    sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                         check=False).stdout.strip()
+    profile = (STATE_DIR / "profile").read_text() if (STATE_DIR / "profile").exists() else ""
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    Path(target).write_text(json.dumps({
+        "subject": os.environ.get("PARITY_SUBJECT", "current"), "product_sha": sha, "profile": profile,
+        "exit_status": int(exitstatus), "tests": _RESULTS,
+    }, default=str, ensure_ascii=False, indent=1))
+
+
+def note_exception(exception_id: str, item: dict) -> None:
+    """Record that the current test accepted a difference from Nightscout under an approved exception."""
+    _entry(_ACTIVE["nodeid"])["exceptions"].append({"id": exception_id, **item})
+
+
 def report(mismatches: list, limit: int = 8) -> str:
-    """Summarise mismatches by kind, with up to `limit` examples of each kind."""
+    """Summarise mismatches by kind, with up to `limit` examples of each kind, and record them for the report."""
+    _entry(_ACTIVE["nodeid"])["mismatches"].extend(mismatches)
     groups: dict[str, list] = {}
     for item in mismatches:
         groups.setdefault(str(item.get("what", item.get("field", "mismatch"))), []).append(item)

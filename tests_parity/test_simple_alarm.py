@@ -1,4 +1,4 @@
-"""Compare the corrected Home Assistant product with stock's threshold plugin."""
+"""Compare the product under test with stock's threshold plugin."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 
 from .conftest import HERE, ROOT, node
 
-pytestmark = pytest.mark.corrected_product
 CARD = ROOT / "custom_components/nightscout_extended/www/nightscout-glucose-card.js"
 DOMAIN = "nightscout_extended"
 NOW = datetime(2026, 1, 8, 12, tzinfo=timezone.utc)
@@ -106,7 +105,7 @@ async def _entry(hass, site, reading, freezer):
     _set_wire(site, reading)
     entry = MockConfigEntry(domain=DOMAIN, unique_id=site["url"], title="Parity", data={CONF_URL: site["url"]})
     entry.add_to_hass(hass)
-    assert await hass.config_entries.async_setup(entry.entry_id), "corrected product failed entry setup"
+    assert await hass.config_entries.async_setup(entry.entry_id), "the product under test failed entry setup"
     await hass.async_block_till_done()
     return entry
 
@@ -131,7 +130,7 @@ def _observation(hass):
     assert glucose is not None and last is not None, "required Home Assistant entities are missing"
     assert "simple_alarm" in glucose.attributes, (
         "missing product capability: glucose has no simple_alarm attribute; "
-        "check that pytest loaded the pinned corrected PR1 product"
+        "(the alarm badge is not implemented in this product)"
     )
     return glucose, {"glucose": glucose.as_dict(), "last": last.as_dict()}
 
@@ -197,7 +196,7 @@ async def test_default_site_alarms_and_options_round_trip(hass, freezer, alarm_s
         "card": str(CARD), "now": NOW.isoformat(), "cases": [case for _, case in observed],
     })
     for alarm, card in zip(expected, cards, strict=True):
-        assert card["hasAlarmElement"], "corrected product card has no separate alarm element"
+        assert card["hasAlarmElement"], "the card under test has no separate alarm element"
         assert card["alarm"] == BADGES.get(alarm)
         assert BADGES[alarm] in card["ariaLabel"]
     assert len({card["text"] for card in cards}) == 1

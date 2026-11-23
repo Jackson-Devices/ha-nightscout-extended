@@ -10,6 +10,8 @@ import math
 import os
 from pathlib import Path
 import re
+
+import pytest
 import subprocess
 import sys
 
@@ -19,7 +21,6 @@ from homeassistant.util.unit_conversion import BloodGlucoseConcentrationConverte
 from .candidate_probe import DOMAIN, V3_PROTECTED
 from .version_stock import DEBUG_PERMISSION, EPOCH, READABLE, instant, read_subject, request, require
 
-REFERENCE = "44f4e7c2809ee00d43a9642e875efd8fb2157478"
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = Path("custom_components") / DOMAIN
 COMMON = {"v1.status", "v2.bgnow", "v2.properties"}
@@ -62,15 +63,14 @@ def _supports_v3(root):
 
 
 def _checkout():
-    current = _supports_v3(ROOT)
-    root = ROOT if current else ROOT / ".parity-reference"
-    require(root.is_dir() and _supports_v3(root),
-            "v3 product missing; expected current v3-capable source or .parity-reference at " + REFERENCE)
+    """The product under test is the checked-out code. It is never swapped for another branch's code."""
+    if not _supports_v3(ROOT):
+        pytest.skip("not applicable: the product under test has no v3 client")
+    root = ROOT
     require(Path(_git(root, "rev-parse", "--show-toplevel")).resolve() == root.resolve(),
             "candidate must be its own Git checkout")
     sha = _git(root, "rev-parse", "HEAD")
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "candidate checkout HEAD is invalid")
-    require(current or sha == REFERENCE, "candidate reference checkout differs from the verified PR4 pin")
     require(not _git(root, "status", "--porcelain", "--untracked-files=all", "--", COMPONENT.as_posix()),
             "candidate product source differs from its reported Git commit")
     return root, sha

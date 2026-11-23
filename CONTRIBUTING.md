@@ -7,7 +7,7 @@ A pull request that breaks any of them doesn't merge.
 
 **Behaviour must be 1:1 identical to stock Nightscout.** If the integration shows, computes, accepts or rejects
 something differently from Nightscout at the pinned reference, that is a failure. The only exception is an entry
-in the PR's exception register that cites explicit repository-owner approval. Use a PR comment for new exceptions.
+in the PR's exception register that the repository owner has approved in a PR comment.
 
 Every pull request must keep that parity. "Close enough", "more correct than Nightscout" and "matches the
 Swagger schema" are not the bar. What Nightscout's code *does* is the bar, cited by file and line at the pinned
@@ -19,32 +19,36 @@ doesn't let a PR's author request changes. So reviews here are posted as **Comme
 
 ## Checking stock parity
 
-Validate runs the cheap workflow preflight first. On an eligible full run its stock job compares the integration
-with a disposable Nightscout 15.0.6 and MongoDB on three site configurations. One site configuration uses
-one running stock server for the equivalent-permission API comparisons. Each profile has its own database.
+Validate runs preflight first. If preflight is red, nothing else runs, so no stock server starts and no CI time
+is spent. If it's green, every job runs on every push to `main` and every pull request: there are no path filters
+and no draft skips. `.github/scripts/check_workflow_gates.py` enforces both rules in preflight.
 
-Use the two Swagger documents from that stock image to identify public operations and validate the wire
-contract. Compare values, original timestamps and missing readings against the same seeded stock server.
-The calculated v2 properties are outside both published schemas and require pinned source and runtime evidence.
-Report a schema disagreement separately from a difference between the integration and stock. A missing
-product path cannot supply a passing product comparison.
+The Parity job compares three things on each of three stock site profiles (mg/dL default, mg/dL custom thresholds,
+mmol thresholds entered in mmol):
 
-While this branch carries the legacy integration, the same stock job also checks out the fork's v3
-candidate at `44f4e7c2809ee00d43a9642e875efd8fb2157478` into `.parity-reference`. The test runs the
-candidate separately, so its Python imports cannot accidentally resolve to the legacy integration.
-For a local run from this legacy checkout, fetch that commit from the fork into `.parity-reference`
-first. The exact revision matters when interpreting failures. [Reference candidate](https://github.com/Jackson-Devices/ha-nightscout-extended/commit/44f4e7c2809ee00d43a9642e875efd8fb2157478)
+| Name | What it is | Role |
+|---|---|---|
+| **Native** | Stock Nightscout 15.0.6 and MongoDB 5.0.32, pinned by image digest | The oracle. Expected values come from its responses, its stylesheet and its own source run from the container. |
+| **Current** | The checked-out code of the commit being tested | **Gates the merge.** Any difference from native fails, apart from owner-approved exceptions. |
+| **Legacy** | Upstream `aperetti/ha-nightscout-extended` at the fork point, `a8acabe` | **Report only.** The same suite runs against it on a clean site of the same profile. Its differences never fail the job. |
 
-The `corrected_product` marker selects the display and threshold-alarm checks. Run those from the
-separate pinned PR1 worktree with a copy of `tests_parity` and a clean disposable stock instance for the
-same site profile. The legacy and v3 comparisons use their original checkouts.
+The job summary and the `parity-<profile>` artifact hold the three-way report. For each check it says whether
+legacy and current match native, and classifies the result: corrected by current, still differing (blocks the
+merge), new in current, or not applicable. It also lists where current differs from native by owner decision,
+with the decision text and a link to its approval. That report is the record for the upstream developer: where
+the original integration differs from Nightscout, what this fork corrected, and where this fork differs on purpose
+and why.
 
-At 39 and above 400 mg/dL the stock current-reading display prints `LOW` or `HIGH`. The E-1d check confirms
-both the stock label and HA's numeric reading in the site unit. Intermediate values and paint still have
-their own strict comparisons. The alarm test runs the pinned threshold plugin with the stock unit functions.
-It checks the HA entity and separate card badge, including independently saved overrides, disabled flags,
-expiration and a newer unusable reading. This comparison covers the local threshold indication. Predictive
-alarms, snoozes, delivery, and real device limits are outside the gate. [Stock display](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/client/index.js#L518) · [Stock alarms](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/simplealarms.js#L39)
+The product under test is always the checked-out code. A check is never run against another branch's code in its
+place. A check for a capability the product doesn't have, such as v3 reads on a v1-only branch, reports
+"not applicable" with that reason.
+
+Owner decisions on the card so far: **E-1d**, the card shows the number at 39 and above 400 mg/dL where
+Nightscout's display prints its fixed `LOW`/`HIGH` text, with alarm state in a separate badge computed by
+Nightscout's `simplealarms` rule from the site's alarm levels. **E-1b/E-1c/E-1e** are opt-in only (colour modes
+other than `site`, and HA threshold overrides), so every default-configuration check stays strict.
+[Stock display](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/client/index.js#L518) ·
+[Stock alarms](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/simplealarms.js#L39)
 
 ## Universal rules (U-1 to U-14)
 
@@ -57,7 +61,7 @@ alarms, snoozes, delivery, and real device limits are outside the gate. [Stock d
 | **U-5** | **Mutation evidence** | Reverting the production change, or flipping its key operator or constant, makes at least one test fail. Link the run or commit that shows it. |
 | **U-6** | **No weakened tests** | No deletion, skip, `xfail` or relaxed assertion. Each changed assertion is listed in the PR description with the AC that requires it. |
 | **U-7** | **Fixed scope** | The PR description lists the files it may touch. The diff stays within them. No workflow, Dependabot, CodeQL, `SECURITY.md` or CONTRIBUTING changes in a feature PR. |
-| **U-8** | **Exception register** | Every divergence from Nightscout is listed with evidence of the **repo owner's approval**. Obtain new approvals in a PR comment. An unapproved entry fails. |
+| **U-8** | **Exception register** | Every divergence from Nightscout is listed with evidence and needs the **repo owner's approval in a PR comment**, linked from `tests_parity/exceptions.json`. Files outside this repository (work orders, notes, chat logs) are not approval. An agent never adds an entry to the approved list on its own. An unapproved entry fails. |
 | **U-9** | **Evidence at head** | Each AC tick links a CI run at the **current head SHA**. "Passes locally" or a run on an earlier SHA doesn't count. Validate must be green with 0 new CodeQL alerts. |
 | **U-10** | **Stable identifiers** | `unique_id`, entity IDs, attribute names and service names are unchanged unless an AC names the change and gives a migration. Stored data, such as glucose history, doesn't change value after the fact without a migration AC. |
 | **U-11** | **No secret leaks** | No credential (token, API secret or its SHA-1) in logs, exceptions, diagnostics or attributes. Every new error path has a test asserting this. |
