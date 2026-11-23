@@ -25,6 +25,8 @@ jobs:
           python -m pip --disable-pip-version-check install --only-binary :all: --require-hashes -r .github/scripts/requirements-preflight.txt
           python .github/scripts/check_workflow_gates.py
           python .github/scripts/test_workflow_gates.py
+          python .github/scripts/check_exception_register.py
+          python .github/scripts/test_policy_checks.py
           python -m pip --disable-pip-version-check install --only-binary :all: -r tests_parity/requirements.txt
           python -m pytest --noconftest -c /dev/null -q tests_parity/test_stock_contract.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0

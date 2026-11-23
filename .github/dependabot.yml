@@ -23,6 +23,7 @@ updates:
       - /tests
       - /tests_ha
       - /tests_parity
+      - /.github/scripts
     schedule:
       interval: weekly
       day: monday

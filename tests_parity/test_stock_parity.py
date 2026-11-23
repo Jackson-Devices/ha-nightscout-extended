@@ -1,7 +1,8 @@
 """Parity of the integration with a running, pinned stock Nightscout.
 
 Every expected value here comes from Nightscout: the stock server's own responses, JavaScript's own ``Number()``,
-or Nightscout's own display functions and stylesheet served by the stock container. A mismatch means the integration differs
+or Nightscout's own display functions and stylesheet served by the stock container. A mismatch means the integration
+differs
 from Nightscout. See CONTRIBUTING.md (U-4).
 """
 
@@ -56,7 +57,9 @@ def stock_seed_result():
 def seeded(stock, allow_local_stock_server, stock_seed_result):
     """Initialize stock once, after this test's loopback socket guard is active."""
     if "result" in stock_seed_result:
-        assert stock_seed_result["result"] is not None, "the prior stock seed attempt failed; restart the disposable site"
+        assert stock_seed_result["result"] is not None, (
+            "the prior stock seed attempt failed; restart the disposable site"
+        )
         return stock_seed_result["result"]
     # A failure after a write may have seeded only part of the data.
     stock_seed_result["result"] = None
@@ -301,7 +304,8 @@ async def test_treatment_amounts_match_javascript(stock, stock_treatments):
             if shown != expected or (exception and exception not in approved):
                 mismatches.append({"id": uid, "field": field, "notes": treatment.notes,
                                    "javascript": native[field], "integration": shown,
-                                   **({"needs_owner_approval": exception} if exception and exception not in approved else {})})
+                                   **({"needs_owner_approval": exception}
+                                      if exception and exception not in approved else {})})
     assert not mismatches, report(mismatches)
 
 
@@ -348,7 +352,9 @@ async def _render_card_cases(hass, stock, seeded, readings):
         await hass.async_block_till_done()
         glucose = hass.states.get("sensor.parity_glucose")
         last = hass.states.get("sensor.parity_last_reading")
-        assert glucose is not None and last is not None, "card requires the integration's glucose and timestamp entities"
+        assert glucose is not None and last is not None, (
+            "card requires the integration's glucose and timestamp entities"
+        )
         assert datetime.fromisoformat(last.state) == now, "the card received the previous reading's timestamp"
         cases.append({"glucose": glucose.as_dict(), "last": last.as_dict()})
     return node(HERE / "js" / "card_render.mjs", {"card": str(CARD), "now": now.isoformat(), "cases": cases})
@@ -382,7 +388,8 @@ def _compare_current_text(mgdl, card, ns, approved):
     if mgdl == 39 or mgdl > 400:
         stock_label = "LOW" if mgdl == 39 else "HIGH"
         if ns["text"] != stock_label:
-            return {"mgdl": mgdl, "what": "native presentation label", "expected": stock_label, "nightscout": ns["text"]}
+            return {"mgdl": mgdl, "what": "native presentation label", "expected": stock_label,
+                    "nightscout": ns["text"]}
         if "E-1d" not in approved:
             return {"mgdl": mgdl, "what": "numeric presentation", "needs_owner_approval": "E-1d"}
         expected = ns["numericText"]
@@ -452,7 +459,9 @@ async def test_latest_unusable_stock_row_suppresses_older_alarm(hass: HomeAssist
         _wait_for_bgnow(stock, lambda bg: bg.get("mills") == sources[0]["date"], "report the alarm sample")
         entry = await _setup(hass, stock, options={"alarm_high_mgdl": 120})
         before = hass.states.get("sensor.parity_glucose")
-        assert before is not None and "simple_alarm" in before.attributes, "the product under test has no alarm capability"
+        assert before is not None and "simple_alarm" in before.attributes, (
+            "the product under test has no alarm capability"
+        )
 
         stock.post("/api/v1/entries", [sources[1]])
         bgnow = _wait_for_bgnow(

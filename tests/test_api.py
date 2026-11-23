@@ -48,7 +48,9 @@ def test_missing_plugins_are_none():
 
 
 def test_garbage_values_dont_crash():
-    d = api.parse_properties({"iob": {"iob": "n/a"}, "cob": {"cob": True}, "ar2": {"forecast": {"predicted": [{"mills": None}]}}})
+    d = api.parse_properties(
+        {"iob": {"iob": "n/a"}, "cob": {"cob": True}, "ar2": {"forecast": {"predicted": [{"mills": None}]}}}
+    )
     assert d.iob is None and d.cob is None and d.forecast == []
 
 
@@ -217,8 +219,10 @@ def test_treatments_query_and_auth():
             return web.json_response(TREATMENTS)
 
         app.router.add_get("/api/v1/treatments.json", treatments)
-        runner = web.AppRunner(app); await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0); await site.start()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
         port = site._server.sockets[0].getsockname()[1]
         try:
             async with aiohttp.ClientSession() as s:

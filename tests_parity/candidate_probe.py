@@ -356,7 +356,9 @@ def _run(request, result, routes):
         if tuple(Path(path).resolve() for path in package.__path__) != (namespace,):
             raise RuntimeError("unexpected custom integration package")
         ini = temp / "pytest.ini"
-        ini.write_text("[pytest]\nasyncio_mode = auto\nasyncio_default_fixture_loop_scope = function\n", encoding="utf-8")
+        ini.write_text(
+            "[pytest]\nasyncio_mode = auto\nasyncio_default_fixture_loop_scope = function\n", encoding="utf-8"
+        )
 
         class ProbeInput:
             @pytest.fixture

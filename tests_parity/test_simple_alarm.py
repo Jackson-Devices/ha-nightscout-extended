@@ -6,7 +6,6 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
-import pytest
 import pytest_asyncio
 from homeassistant.const import CONF_URL
 from homeassistant.data_entry_flow import FlowResultType
