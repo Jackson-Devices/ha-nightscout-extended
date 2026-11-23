@@ -3,6 +3,36 @@
 Each version's section becomes its GitHub release notes, which Home Assistant shows in the update dialog.
 Add a section here before tagging a release.
 
+## [0.3.3] - 2026-11-22
+
+### Added
+- **Glucose card colour modes.** By default (`colour_mode: site`) the card now paints readings exactly like
+  Nightscout's own display, following your site's theme. `three`, `five`, `custom_three` and `custom_five` are
+  available in the card editor. The glucose sensor has a new `site_theme` attribute for this.
+- **Glucose card** shows active low and high threshold alarms in a separate, accessible badge. Home Assistant
+  uses the site's settings by default and provides individually clearable mg/dL threshold overrides in
+  **Configure**. The integration sends no notifications and makes no changes to Nightscout.
+
+### Fixed
+- **Glucose card**: exact Nightscout thresholds show the correct colour in mg/dL and mmol/L, including for
+  older glucose entities without canonical values. Change and forecast now follow the card's glucose unit
+  even when their Home Assistant entities use a different unit.
+- **Glucose card** keeps readings such as 39 and 401 mg/dL numeric in either display unit and uses Nightscout's
+  mmol/L rounding for native values. The chart expands vertically when needed so extreme readings remain distinct.
+- Glucose, change and forecast sensors expose `native_mgdl` for the unrounded mg/dL value. The glucose
+  sensor also includes `source_time`, pairing the reading with its original timestamp.
+- **CGM error codes** show as Nightscout shows them when they are the newest entry: an empty value for 9
+  (sensor warm-up), `???` for 10, `?SN`, `?NC` and the other codes, with the error's time. The glucose sensor
+  reports no reading (unknown) while an error code is newest and exposes it as `cgm_error_code`.
+- **Glucose card change text** is Nightscout's own, e.g. `+0` and `-0.1`, including when the card shows a
+  different unit from the site. The change sensor exposes `site_display`, `recent_mean_mgdl` and
+  `previous_mean_mgdl` for this.
+- **Glucose card** marks a reading as old at your site's Time Ago warning and urgent limits
+  (`ALARM_TIMEAGO_WARN_MINS`, `ALARM_TIMEAGO_URGENT_MINS`) instead of a fixed 15 minutes, unless you set
+  `stale_minutes` on the card. The glucose sensor exposes `timeago_warn_minutes` and `timeago_urgent_minutes`.
+- A site threshold of 0 (for example `BG_LOW=0`) is used as served instead of being replaced by a default.
+- Fractional mg/dL readings are shown unrounded, as Nightscout shows them.
+
 ## [0.3.2] - 2026-11-21
 
 ### Changed

@@ -14,14 +14,14 @@ integration only provides glucose. This one can run alongside it.
 
 | Sensor | Unit | Notes |
 |---|---|---|
-| Glucose | mg/dL or mmol/L | Follows your Nightscout's unit setting; attributes `direction`, `delta`, `thresholds_mgdl` (your site's alarm levels) |
-| Glucose change | mg/dL or mmol/L | Change since the previous reading |
+| Glucose | mg/dL or mmol/L | Follows your Nightscout's unit setting; attributes `direction`, `delta`, `thresholds_mgdl` (the site's glucose range thresholds), canonical `native_mgdl`, paired `source_time`, plus `simple_alarm` and its expiry `simple_alarm_until` when applicable |
+| Glucose change | mg/dL or mmol/L | Change since the previous reading; attribute `native_mgdl` holds the canonical integration value |
 | Glucose trend | – | Rising quickly … Falling quickly |
 | Last reading | timestamp | When the latest CGM value was taken |
 | Insulin on board | U | Nightscout `iob` plugin; attribute `source` (e.g. Care Portal, Loop, OpenAPS) |
 | Carbs on board | g | Nightscout `cob` plugin |
-| Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin |
-| Forecast in 30 minutes | mg/dL or mmol/L | Attribute `forecast` holds the whole predicted curve |
+| Forecast in 15 minutes | mg/dL or mmol/L | Nightscout `ar2` plugin; attribute `native_mgdl` holds the canonical integration value |
+| Forecast in 30 minutes | mg/dL or mmol/L | Attributes `native_mgdl` and `forecast` (the whole predicted curve) |
 | Last carbs | g | Most recent treatment with carbs; attributes `time`, `event_type`, `notes` |
 | Last insulin | U | Most recent treatment with insulin; same attributes |
 | Current basal | U/h | Disabled by default; enable it if you use a pump |
@@ -79,15 +79,26 @@ name: Sam
 |---|---|
 | ![Glucose card](docs/glucose-card.png) | ![Glucose card at night](docs/glucose-card-night.png) |
 
-- **Big reading, trend arrow and change**, with how long ago it was taken and a bar that empties as it gets older.
-- **Coloured by your Nightscout alarm levels** (`BG_LOW`, `BG_TARGET_BOTTOM`, `BG_TARGET_TOP`, `BG_HIGH`): urgent
-  low, low, in range, high, urgent high. Grey with a warning once there's been no reading for 15 minutes.
-- **Chart behind the number**: recent readings, the target range, and the AR2 forecast as a dotted line.
+- **Big numeric reading, trend arrow and change**, with how long ago it was taken and a bar that empties as it gets
+  older. Readings such as 39 and 401 mg/dL stay numeric in either display unit.
+- **Colours follow your Nightscout glucose ranges** (`BG_LOW`, `BG_TARGET_BOTTOM`, `BG_TARGET_TOP`, `BG_HIGH`).
+  By default they also follow your site's Nightscout theme, exactly as Nightscout's own display does; see
+  [Colour modes](#colour-modes). The card shows a warning once there's been no reading for 15 minutes.
+- **A separate alarm badge** shows an active Low, Urgent low, High or Urgent high threshold alarm. It disappears
+  when the reading is no longer fresh or the alarm clears. The badge and its accessible text stay separate from
+  the reading and its colour.
+- **Chart behind the number** with recent readings, the target range, and the AR2 forecast as a dotted line. The
+  vertical scale expands to show out-of-range points such as 401 mg/dL at their own height.
 - **Night mode** from 21:00 to 07:00 by default.
 - **IOB, COB and the 30-minute forecast** along the bottom.
 - mg/dL or mmol/L, following the sensor's unit.
 
-It finds the integration's sensors itself; set `entity` if you have more than one Nightscout site.
+The card finds the integration's sensors automatically. Set `entity` if you have more than one Nightscout site.
+Range colours, the reading, change and forecast use the sensors' canonical `native_mgdl` attributes. When the
+card displays native values in mmol/L, it uses Nightscout's rounding. Older entities without those attributes fall
+back through each entity's own displayed unit. Recorder chart history also reconstructs older displayed states and can therefore
+have lower precision than current readings. If you change the glucose sensor's unit, points recorded before the switch can
+appear at the wrong scale until they leave the chart window.
 
 | Option | Default | |
 |---|---|---|
@@ -99,12 +110,53 @@ It finds the integration's sensors itself; set `entity` if you have more than on
 | `show_chart`, `show_footer`, `show_clock` | `true` | Turn parts off |
 | `night_mode` | `true` | Dim to coloured text on black at night |
 | `night_start`, `night_end` | `21`, `7` | Night hours (0–23) |
-| `stale_minutes` | `15` | Minutes without a reading before the card turns grey |
+| `stale_minutes` | site's Time Ago limit | Minutes without a reading before the card shows it as stale. Unset, the card follows your Nightscout site's Time Ago warning/urgent limits (15 if the integration can't read them) |
+| `colour_mode` | `site` | How readings are coloured; see [Colour modes](#colour-modes) |
+| `colour_urgent`, `colour_warning`, `colour_inrange` | none | Colours for `custom_three`, e.g. `"#d32f2f"` |
+| `colour_urgent_low`, `colour_low`, `colour_in_range`, `colour_high`, `colour_urgent_high` | none | Colours for `custom_five` |
 
 For a full-screen display, put the card alone in a **panel** view and set `fill_screen: true`.
 
-> The card shows what Home Assistant last read from Nightscout. It is not an alarm: it makes no sound and can't
-> tell you about readings Home Assistant hasn't received. Keep your CGM app's alerts on.
+### Colour modes
+
+Every mode decides **which range a reading is in** the same way: raw mg/dL against your site's thresholds,
+as Nightscout does. Modes change only how that range is painted.
+
+| `colour_mode` | Looks like |
+|---|---|
+| `site` (default) | **Matches Nightscout.** Black background; the reading is red when urgent, yellow for a warning and green when in range, using Nightscout's own stylesheet colours. Your site's `THEME` decides which ranges are coloured, as on the Nightscout page: `default` colours nothing, `colorblindfriendly` colours urgent and warning only, `colors` colours all three. |
+| `three` | Nightscout's three colours (urgent, warning, in range), whatever your site's theme |
+| `five` | The card's own five full-background colours (urgent low, low, in range, high, urgent high), with coloured text on black at night |
+| `custom_three` | Like `three`, with your colours: `colour_urgent`, `colour_warning`, `colour_inrange` |
+| `custom_five` | Like `five`, with your colours: `colour_urgent_low`, `colour_low`, `colour_in_range`, `colour_high`, `colour_urgent_high` |
+
+Only `site` matches Nightscout's display. The others are opt-in differences the repository owner approved.
+Custom colours are hex (`"#d32f2f"` or `"#d33"`); the card editor's colour pickers produce them for you. They're
+in the editor's *Custom colours* section, which is used only by the custom modes. A custom mode with a missing or
+invalid colour shows a configuration error instead of guessing one. A reading that isn't current is shown without
+a range colour, like Nightscout.
+
+### Local threshold alarms
+
+Home Assistant evaluates the latest reading it received using Nightscout's enabled simple threshold rules and
+the Nightscout site's units. The site thresholds apply by default. The badge needs a recent reading and
+available site alarm settings.
+
+To override a threshold locally, open **Settings → Devices & services → Nightscout Extended → Configure** and
+enter a value in the corresponding field:
+
+- **Urgent low threshold (mg/dL)**
+- **Low threshold (mg/dL)**
+- **High threshold (mg/dL)**
+- **Urgent high threshold (mg/dL)**
+
+Use mg/dL even when the site or card displays mmol/L. Clear a field and save to use the Nightscout value for that
+threshold again. Site alarm switches still apply. These options affect the badge and its glucose sensor attributes.
+The card's range colours still follow the site's glucose ranges.
+
+The badge reports a local threshold result. Nightscout handles its own settings, predictive alerts, notifications
+and acknowledgements. The integration makes no sound, sends no notifications and makes no changes to Nightscout.
+Keep your CGM app's alerts on.
 
 ## Installation
 

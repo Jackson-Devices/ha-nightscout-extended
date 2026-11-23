@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -14,14 +15,15 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import UnitOfBloodGlucoseConcentration
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from homeassistant.util import dt as dt_util
 
+from .alarm import evaluate_simple_alarm
 from .api import NightscoutData
-
 from .const import UNIT_MMOL
 from .coordinator import NightscoutConfigEntry, NightscoutCoordinator
 from .entity import device_info
@@ -193,6 +195,7 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
     def __init__(self, coordinator: NightscoutCoordinator, description: NightscoutSensorDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description
+        self._cancel_alarm_expiry: Callable[[], None] | None = None
         entry = coordinator.config_entry
         self._attr_unique_id = f"{entry.unique_id or entry.entry_id}_{description.key}"
         if description.glucose:
@@ -201,6 +204,52 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
             self._attr_suggested_unit_of_measurement = MMOL if coordinator.units == UNIT_MMOL else MGDL
             self._attr_suggested_display_precision = 1 if coordinator.units == UNIT_MMOL else 0
         self._attr_device_info = device_info(coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self.entity_description.key == "glucose":
+            self.async_on_remove(self._async_cancel_alarm_expiry)
+            self._async_schedule_alarm_expiry()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        if self.entity_description.key == "glucose":
+            self._async_schedule_alarm_expiry()
+        super()._handle_coordinator_update()
+
+    def _simple_alarm(self, settings: dict[str, Any] | None) -> tuple[str | None, datetime | None]:
+        if not self.available:
+            return None, None
+        data = self.coordinator.data
+        if (data.alarm_glucose, data.alarm_glucose_time) != (data.glucose, data.glucose_time):
+            return None, None
+        return evaluate_simple_alarm(
+            data.alarm_glucose, data.alarm_glucose_time, settings, dt_util.utcnow(),
+        )
+
+    @callback
+    def _async_cancel_alarm_expiry(self) -> None:
+        cancel = self._cancel_alarm_expiry
+        self._cancel_alarm_expiry = None
+        if cancel is not None:
+            cancel()
+
+    @callback
+    def _async_schedule_alarm_expiry(self) -> None:
+        self._async_cancel_alarm_expiry()
+        _, expiry = self._simple_alarm(self.coordinator.alarm_settings)
+        if expiry is None:
+            return
+
+        @callback
+        def expire(_when: datetime) -> None:
+            if self._cancel_alarm_expiry is not cancel:
+                return
+            self._cancel_alarm_expiry = None
+            self.async_write_ha_state()
+
+        cancel = async_track_point_in_utc_time(self.hass, expire, expiry)
+        self._cancel_alarm_expiry = cancel
 
     @property
     def native_value(self) -> float | int | str | datetime | None:
@@ -211,12 +260,52 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
         attrs = (
-            self.entity_description.attrs_fn(self.coordinator.data)
+            self.entity_description.attrs_fn(data)
             if self.entity_description.attrs_fn
             else None
         )
+        if self.entity_description.glucose:
+            native_mgdl = self.entity_description.value_fn(data)
+            if (
+                isinstance(native_mgdl, (int, float))
+                and not isinstance(native_mgdl, bool)
+                and isfinite(native_mgdl)
+            ):
+                attrs = {**(attrs or {}), "native_mgdl": native_mgdl}
         if self.entity_description.key == "glucose":
             # For the bundled card: colour the reading by the site's own alarm levels.
             attrs = {**(attrs or {}), "thresholds_mgdl": self.coordinator.thresholds_mgdl}
+            if data.glucose_time is not None:
+                attrs["source_time"] = data.glucose_time.isoformat()
+            settings = self.coordinator.alarm_settings
+            alarm, expiry = self._simple_alarm(settings)
+            attrs["simple_alarm"] = alarm
+            attrs["simple_alarm_until"] = expiry.isoformat() if expiry is not None else None
+            attrs["alarm_thresholds_mgdl"] = settings["thresholds_mgdl"] if settings is not None else None
+            # For the card's default colour mode: Nightscout's display theme, passed through unchanged.
+            site_settings = self.coordinator.status.get("settings")
+            theme = site_settings.get("theme") if isinstance(site_settings, dict) else None
+            if isinstance(theme, str):
+                attrs["site_theme"] = theme
+            # For the card's text and freshness: the site's display unit, a newest raw CGM error code, and
+            # Nightscout's Time Ago limits (None for a disabled limit).
+            if (units := self.coordinator.site_units) is not None:
+                attrs["site_units"] = units
+            if data.cgm_error_code is not None:
+                attrs["cgm_error_code"] = data.cgm_error_code
+            if (timeago := self.coordinator.timeago_minutes) is not None:
+                attrs["timeago_warn_minutes"] = timeago["warn"]
+                attrs["timeago_urgent_minutes"] = timeago["urgent"]
+        if self.entity_description.key == "glucose_delta":
+            # Nightscout's own change text and the means it is computed from (bgnow.js calcDelta).
+            attrs = {
+                **(attrs or {}),
+                "site_display": data.delta_display,
+                "recent_mean_mgdl": data.delta_recent_mean,
+                "previous_mean_mgdl": data.delta_previous_mean,
+            }
+            if (units := self.coordinator.site_units) is not None:
+                attrs["site_units"] = units
         return attrs

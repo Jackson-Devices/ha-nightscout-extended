@@ -73,6 +73,15 @@ class NightscoutData:
     basal: float | None = None
     forecast: list[ForecastPoint] = field(default_factory=list)
     treatments: list[Treatment] = field(default_factory=list)  # sorted by time, past and future
+    alarm_glucose: float | None = None
+    alarm_glucose_time: datetime | None = None
+    forecast_source_time: datetime | None = None
+    # Nightscout's current-reading display shows the newest raw entry, error codes included.
+    cgm_error_code: int | None = None
+    # Nightscout's own change inputs (lib/plugins/bgnow.js calcDelta), for the card's change text.
+    delta_display: str | None = None
+    delta_recent_mean: float | None = None
+    delta_previous_mean: float | None = None
 
     def last_treatment(self, attr: str, now: datetime) -> Treatment | None:
         """The most recent treatment at or before `now` with a non-zero `attr` (carbs or insulin)."""
@@ -82,10 +91,10 @@ class NightscoutData:
         return None
 
     def forecast_at(self, minutes: int) -> ForecastPoint | None:
-        """The forecast point closest to `minutes` after the latest reading (within 3 min)."""
-        if not self.forecast or self.glucose_time is None:
+        """The forecast point closest to `minutes` after the AR2 source (within 3 min)."""
+        if not self.forecast or self.forecast_source_time is None:
             return None
-        target = self.glucose_time.timestamp() + minutes * 60
+        target = self.forecast_source_time.timestamp() + minutes * 60
         best = min(self.forecast, key=lambda p: abs(p.time.timestamp() - target))
         return best if abs(best.time.timestamp() - target) <= 180 else None
 
@@ -93,7 +102,7 @@ class NightscoutData:
 def _ms_to_dt(ms: Any) -> datetime | None:
     try:
         return datetime.fromtimestamp(float(ms) / 1000, tz=timezone.utc)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
@@ -102,11 +111,34 @@ def _num(value: Any) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
-def parse_properties(props: dict[str, Any]) -> NightscoutData:
+def _latest_raw_sample(
+    bgnow: dict[str, Any], now: datetime,
+) -> tuple[dict[str, Any] | None, datetime | None]:
+    # Stock bgnow.last omits error values; the raw bucket is visited newest first.
+    rows = bgnow.get("sgvs")
+    if not isinstance(rows, list):
+        return None, None
+    latest = None
+    latest_time = None
+    for row in rows:
+        if not isinstance(row, dict) or isinstance(row.get("mills"), bool):
+            return None, None
+        when = _ms_to_dt(row.get("mills"))
+        if when is None:
+            return None, None
+        if when <= now and (latest_time is None or when > latest_time):
+            latest = row
+            latest_time = when
+    return latest, latest_time
+
+
+def parse_properties(
+    props: dict[str, Any], *, now: datetime | None = None,
+) -> NightscoutData:
     """Turn a /api/v2/properties response into NightscoutData.
 
     Every plugin is optional: a Nightscout without `cob` enabled simply leaves cob as None.
@@ -116,12 +148,39 @@ def parse_properties(props: dict[str, Any]) -> NightscoutData:
     bgnow = props.get("bgnow") or {}
     data.glucose = _num(bgnow.get("last"))
     data.glucose_time = _ms_to_dt(bgnow.get("mills"))
+    # Nightscout AR2 starts from bgnow.mills, even if the raw reading is newer.
+    data.forecast_source_time = data.glucose_time
+    raw, raw_time = _latest_raw_sample(
+        bgnow, now if now is not None else datetime.now(timezone.utc),
+    )
 
     delta = props.get("delta") or {}
     data.delta = _num(delta.get("mgdl"))
+    display = delta.get("display")
+    data.delta_display = display if isinstance(display, str) and display else None
+    data.delta_recent_mean = _num(bgnow.get("mean"))
+    data.delta_previous_mean = _num(delta.get("mean5MinsAgo"))
 
     direction = props.get("direction") or {}
     data.direction = direction.get("value") or None
+    if raw is not None and raw_time is not None:
+        data.alarm_glucose = _num(raw.get("mgdl"))
+        data.alarm_glucose_time = raw_time
+        # Nightscout's display shows the newest raw entry (lib/client/index.js updateCurrentSGV): 39 as a
+        # number (owner decision E-1d) and codes below 39 as CGM error codes, which are not glucose values.
+        raw_mgdl = data.alarm_glucose
+        if (raw_mgdl is not None and raw_mgdl <= 39
+                and (data.glucose_time is None or raw_time >= data.glucose_time)):
+            if raw_mgdl == 39:
+                data.glucose = raw_mgdl
+            else:
+                data.glucose = None
+                data.cgm_error_code = int(raw_mgdl) if float(raw_mgdl).is_integer() else None
+            data.glucose_time = raw_time
+            data.delta = None  # Stock bgnow delta uses glucose values strictly above 39.
+            data.delta_display = data.delta_recent_mean = data.delta_previous_mean = None
+            raw_direction = raw.get("direction")
+            data.direction = raw_direction if isinstance(raw_direction, str) and raw_direction else None
 
     iob = props.get("iob") or {}
     data.iob = _num(iob.get("iob"))
@@ -268,8 +327,8 @@ class NightscoutClient:
         props = await self._get(f"/api/v2/properties/{PROPERTIES}")
         if not isinstance(props, dict):
             raise NightscoutConnectionError("Unexpected properties response")
-        data = parse_properties(props)
         now = datetime.now(timezone.utc)
+        data = parse_properties(props, now=now)
         data.treatments = await self.async_get_treatments(now - past, now + ahead)
         return data
 

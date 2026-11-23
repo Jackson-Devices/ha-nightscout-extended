@@ -5,6 +5,14 @@ DOMAIN = "nightscout_extended"
 CONF_USE_API_SECRET = "use_api_secret"
 CONF_SCAN_INTERVAL = "scan_interval"
 
+# The order is also the order in which Nightscout validates raw mg/dL thresholds.
+ALARM_THRESHOLD_OPTIONS = {
+    "urgent_low": "alarm_urgent_low_mgdl",
+    "low": "alarm_low_mgdl",
+    "high": "alarm_high_mgdl",
+    "urgent_high": "alarm_urgent_high_mgdl",
+}
+
 DEFAULT_SCAN_INTERVAL = 60  # seconds; CGM readings arrive every 5 minutes (1 for some sensors)
 MIN_SCAN_INTERVAL = 30
 

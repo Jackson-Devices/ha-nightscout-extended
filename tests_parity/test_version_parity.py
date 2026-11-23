@@ -484,8 +484,12 @@ async def test_stock_original_time_distinguishes_stale_from_missing(
         else:
             assert "last" not in current and "mills" not in current
             assert any((e["mgdl"], e["mills"]) == (10, seed["date"]) for e in current["errors"])
-            assert data.glucose is None and data.glucose_time is None
-            assert glucose.state == last_reading.state == STATE_UNKNOWN
+            # Stock shows the newest raw entry, errors included (client updateCurrentSGV), and times it with
+            # timeago over sbx.data.sgvs, which keeps error entries: the code is shown with the error's time.
+            assert data.glucose is None and data.cgm_error_code == 10
+            assert data.glucose_time == instant(seed["dateString"])
+            assert glucose.state == STATE_UNKNOWN
+            assert instant(last_reading.state) == instant(seed["dateString"]).replace(microsecond=0)
 
 
 def _read_stock_profiles(wire, reader):
