@@ -46,7 +46,7 @@ start() {
     mgdl-default)
       site=(-e DISPLAY_UNITS=mg/dl) ;;
     mgdl-custom)
-      site=(-e DISPLAY_UNITS=mg/dl -e BG_HIGH=250 -e BG_TARGET_TOP=170 -e BG_TARGET_BOTTOM=75 -e BG_LOW=60
+      site=(-e DISPLAY_UNITS=mg/dl -e BG_HIGH=250 -e BG_TARGET_TOP=170 -e BG_TARGET_BOTTOM=75 -e BG_LOW=0
             -e ALARM_TIMEAGO_WARN_MINS=20 -e THEME=colors) ;;
     mmol-custom)
       site=(-e DISPLAY_UNITS=mmol -e BG_HIGH=14 -e BG_TARGET_TOP=10 -e BG_TARGET_BOTTOM=4 -e BG_LOW=3.5

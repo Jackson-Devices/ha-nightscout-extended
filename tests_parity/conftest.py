@@ -97,7 +97,11 @@ class Stock:
     # ---- Nightscout's own source -------------------------------------------
 
     def copy_native(self, destination: Path) -> Path:
-        """Copy the running server's lib/ directory out of the container, unchanged."""
+        """Copy the running server's lib/ directory out of the container, unchanged.
+
+        Its lodash is copied beside it (destination/node_modules), so modules such as lib/plugins/bgnow.js and
+        lib/sandbox.js load exactly as the server loads them.
+        """
         for app in ("/opt/app", "/app", "/usr/src/app"):
             probe = subprocess.run(
                 ["docker", "exec", NS_CONTAINER, "test", "-f", f"{app}/lib/units.js"],
@@ -105,6 +109,9 @@ class Stock:
             )
             if probe.returncode == 0:
                 subprocess.run(["docker", "cp", f"{NS_CONTAINER}:{app}/lib", str(destination)], check=True)
+                (destination / "node_modules").mkdir()
+                subprocess.run(["docker", "cp", f"{NS_CONTAINER}:{app}/node_modules/lodash",
+                                str(destination / "node_modules" / "lodash")], check=True)
                 return destination / "lib"
         raise RuntimeError("Could not find Nightscout's lib/ directory in the stock container")
 
@@ -154,6 +161,14 @@ def _entry(nodeid: str | None) -> dict:
 def pytest_runtest_setup(item):
     _ACTIVE["nodeid"] = item.nodeid
     _entry(item.nodeid)
+
+
+def pytest_collectreport(report):
+    # A module that fails to import is a failed check, not an absent one.
+    if report.failed:
+        entry = _entry(f"{report.nodeid}::<collection>")
+        entry["outcome"] = "failed"
+        entry["message"] = (report.longreprtext or "collection error").strip().splitlines()[-1][:400]
 
 
 def pytest_runtest_logreport(report):

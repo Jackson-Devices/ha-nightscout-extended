@@ -1,6 +1,9 @@
 // Nightscout's own current-reading display and non-alarming paint from the pinned stock server.
 //
-// Input (stdin JSON): { lib, css?, settings: { units, thresholds, theme }, cases: [mgdl, ...] }
+// Input (stdin JSON): { lib, css?, settings: { units, thresholds, theme, alarmTimeago* }, now?,
+//                       cases: [mgdl | { mgdl, ageMs }, ...] }
+// Freshness comes from Nightscout's own lib/plugins/timeago.js checkStatus, and error-code text from
+// lib/plugins/errorcodes.js, both from the stock container. A bare number is a reading taken at `now`.
 // Output: [{ mgdl, text, numericText, rangeClass, paint?: { background, foreground } }]
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -37,11 +40,32 @@ function declaration(selector, property) {
 }
 const idlePaint = rules && { background: declaration("body", "background"), foreground: declaration("body", "color") };
 
+// lib/plugins/errorcodes.js: extract code2Display and toDisplay verbatim (the module itself needs lodash).
+const errorSource = readFileSync(path.join(input.lib, "plugins", "errorcodes.js"), "utf8");
+const tableStart = errorSource.indexOf("var code2Display = {");
+const tableEnd = errorSource.indexOf("};", tableStart) + 2;
+const toDisplayStart = errorSource.indexOf("function toDisplay (");
+let toDisplayEnd = errorSource.indexOf("{", toDisplayStart);
+for (let depth = 0; toDisplayEnd < errorSource.length; toDisplayEnd++) {
+  if (errorSource[toDisplayEnd] === "{") depth++;
+  else if (errorSource[toDisplayEnd] === "}" && --depth === 0) { toDisplayEnd++; break; }
+}
+if (tableStart < 0 || toDisplayStart < 0) throw new Error("Nightscout errorcodes.js layout not recognised");
+const toDisplay = new Function(
+  `${errorSource.slice(tableStart, tableEnd)}\n${errorSource.slice(toDisplayStart, toDisplayEnd)}\nreturn toDisplay;`,
+)();
+
+// lib/plugins/timeago.js needs only lib/times.js; its checkStatus is Nightscout's freshness rule.
+const timeago = require(path.join(input.lib, "plugins", "timeago.js"))({
+  language: { translate: (text) => text }, levels: {},
+});
+const nowMs = input.now === undefined ? Date.now() : new Date(input.now).getTime();
+
 const client = {
   settings: input.settings,
-  timeago: { checkStatus: () => "current" },
+  timeago,
   sbx: {},
-  errorcodes: { toDisplay: (value) => `error code ${value}` },
+  errorcodes: { toDisplay },
 };
 const container = {
   rangeClass: "",
@@ -67,11 +91,17 @@ const make = new Function(
 );
 const { updateCurrentSGV, scaleBg } = make(client, units, currentBG, container, bgStatus, () => false, () => false);
 
-const out = input.cases.map((mgdl) => {
+const out = input.cases.map((item) => {
+  const { mgdl, ageMs = 0 } = typeof item === "number" ? { mgdl: item } : item;
+  const entry = { mgdl, mills: nowMs - ageMs };
+  // checkStatus reads sbx.time, sbx.settings and sbx.lastSGVEntry(); "server" disables browser-only
+  // hibernation detection, which depends on wall-clock time between calls.
+  client.sbx = { runtimeEnvironment: "server", time: nowMs, settings: input.settings, lastSGVEntry: () => entry };
   currentBG.out = "";
-  updateCurrentSGV({ mgdl });
+  updateCurrentSGV(entry);
   const { rangeClass } = container;
-  const display = { mgdl, text: currentBG.out, numericText: String(scaleBg(mgdl)), rangeClass };
+  const status = timeago.checkStatus(client.sbx);
+  const display = { mgdl, ageMs, status, text: currentBG.out, numericText: String(scaleBg(mgdl)), rangeClass };
   if (!idlePaint) return display;
   const paint = rangeClass
     ? { ...idlePaint, foreground: declaration(`.${rangeClass} .bgButton`, "color") }

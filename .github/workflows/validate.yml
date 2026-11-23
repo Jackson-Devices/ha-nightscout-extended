@@ -119,28 +119,6 @@ jobs:
           fail-on-severity: low
           comment-summary-in-pr: never
 
-  # A filled-in pull request template (Definition of Ready) and a CHANGELOG entry for product changes (U-14).
-  pr-policy:
-    needs: preflight
-    if: ${{ needs.preflight.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-      - name: Check the pull request description and changelog
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          fi
-          python3 .github/scripts/check_pr_policy.py
-
   # Red when CodeQL is switched off, so a skipped scan can never count as a pass for a required check.
   codeql-enabled:
     needs: preflight

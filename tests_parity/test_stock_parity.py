@@ -33,6 +33,9 @@ CARD = ROOT / "custom_components" / "nightscout_extended" / "www" / "nightscout-
 
 # Treatment amounts as they can be stored by uploaders that write to MongoDB directly. The v1 write path would
 # normalise them, so they're inserted straight into the database. "__INFINITY__" becomes JavaScript Infinity.
+# Readings a tenth either side of every profile's thresholds (mg/dL and the mmol profile's, in mg/dL).
+FRACTIONAL_READINGS = sorted({round(edge + step, 1) for edge in (55, 60, 63, 72, 75, 80, 170, 180, 250, 252, 260)
+                              for step in (-0.1, 0.1)})
 AMOUNTS = [
     12.75, 0, -1, "6.5", " 6.5 ", "0x1A", "1e2", "1_0", "١٢", "Infinity", "", "0", "invalid",
     True, False, None, [6.5], [], [1, 2], {"value": 6.5}, "__INFINITY__",
@@ -188,9 +191,17 @@ def test_stock_stores_entries_as_sent_and_reads_them_as_mgdl(stock, seeded):
 
 
 def test_stock_serves_thresholds_in_mgdl(stock):
-    """On every site, including mmol sites configured in mmol, /api/v1/status serves mg/dL thresholds."""
+    """On every site, including mmol sites configured in mmol, /api/v1/status serves mg/dL thresholds.
+
+    15.0.6 lib/settings.js converts all four from mmol when bgHigh < 50; a configured 0 (BG_LOW=0, as in the
+    mgdl-custom profile) stays 0, so the three target and high limits carry the unit check.
+    """
     thresholds = stock.get("/api/v1/status.json")["settings"]["thresholds"]
-    assert all(value >= 30 for value in thresholds.values()), f"thresholds not in mg/dL: {thresholds}"
+    limits = [thresholds[name] for name in ("bgHigh", "bgTargetTop", "bgTargetBottom")]
+    assert all(value >= 30 for value in limits), f"thresholds not in mg/dL: {thresholds}"
+    assert thresholds["bgLow"] == 0 or thresholds["bgLow"] >= 30, f"bgLow not in mg/dL: {thresholds}"
+    if stock.profile == "mgdl-custom":
+        assert thresholds["bgLow"] == 0, f"the BG_LOW=0 profile did not serve 0: {thresholds}"
 
 
 # ---- the integration against stock --------------------------------------------------------------------------
@@ -340,14 +351,26 @@ async def test_last_treatment_entities_match_stock_amounts(hass: HomeAssistant, 
     assert not mismatches, report(mismatches)
 
 
-async def _render_card_cases(hass, stock, seeded, readings):
+# The fixed observation time for rendered cases: midday, so the card's night mode never applies.
+def _render_now(seeded) -> datetime:
+    return seeded["now"].replace(hour=12, minute=0, second=0)
+
+
+async def _render_card_cases(hass, stock, seeded, readings, ages_ms=None):
+    """Push each reading through the integration's coordinator and render the card from the resulting states.
+
+    `ages_ms[i]` places reading i that many milliseconds before the observation time (default: taken now).
+    """
     entry = await _setup(hass, stock)
     coordinator = entry.runtime_data
-    now = seeded["now"].replace(hour=12, minute=0, second=0)
+    now = _render_now(seeded)
     cases = []
-    for mgdl in readings:
+    for index, mgdl in enumerate(readings):
+        when = now - timedelta(milliseconds=ages_ms[index] if ages_ms else 0)
         coordinator.async_set_updated_data(
-            dataclasses.replace(coordinator.data, glucose=float(mgdl), glucose_time=now)
+            dataclasses.replace(coordinator.data, glucose=float(mgdl), glucose_time=when, cgm_error_code=None)
+            if hasattr(coordinator.data, "cgm_error_code")
+            else dataclasses.replace(coordinator.data, glucose=float(mgdl), glucose_time=when)
         )
         await hass.async_block_till_done()
         glucose = hass.states.get("sensor.parity_glucose")
@@ -355,18 +378,27 @@ async def _render_card_cases(hass, stock, seeded, readings):
         assert glucose is not None and last is not None, (
             "card requires the integration's glucose and timestamp entities"
         )
-        assert datetime.fromisoformat(last.state) == now, "the card received the previous reading's timestamp"
+        source = glucose.attributes.get("source_time")
+        shown_time = datetime.fromisoformat(source) if source else datetime.fromisoformat(last.state)
+        assert abs(shown_time - when) < timedelta(seconds=1), "the card received the previous reading's timestamp"
         cases.append({"glucose": glucose.as_dict(), "last": last.as_dict()})
     return node(HERE / "js" / "card_render.mjs", {"card": str(CARD), "now": now.isoformat(), "cases": cases})
 
 
-def _native_display(stock, native_lib, readings, *, paint=False):
+def _native_display(stock, native_lib, readings, *, paint=False, now=None):
+    """Nightscout's own current-reading display (updateCurrentSGV) for each reading, with its real timeago.
+
+    A reading is a number (taken at `now`) or {"mgdl": ..., "ageMs": ...}.
+    """
     settings = stock.get("/api/v1/status.json")["settings"]
     payload = {
         "lib": str(native_lib),
-        "settings": {"units": settings["units"], "thresholds": settings["thresholds"], "theme": settings["theme"]},
+        # The served settings as Nightscout's client receives them: units, thresholds, theme, Time Ago alarms.
+        "settings": settings,
         "cases": readings,
     }
+    if now is not None:
+        payload["now"] = now.isoformat()
     if paint:
         payload["css"] = stock.get_raw("/css/main.css").decode("utf-8")
     return node(HERE / "js" / "native_display.mjs", payload)
@@ -386,7 +418,7 @@ def _css_colour(value):
 def _compare_current_text(mgdl, card, ns, approved):
     """Keep the stock label and HA numeric requirement as independent assertions."""
     if mgdl == 39 or mgdl > 400:
-        stock_label = "LOW" if mgdl == 39 else "HIGH"
+        stock_label = "LOW" if mgdl < 40 else "HIGH"
         if ns["text"] != stock_label:
             return {"mgdl": mgdl, "what": "native presentation label", "expected": stock_label,
                     "nightscout": ns["text"]}
@@ -403,10 +435,13 @@ def _compare_current_text(mgdl, card, ns, approved):
 
 
 async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seeded, native_lib):
-    """Compare text and both rendered colours from 40 to 450 mg/dL in the default daytime card configuration."""
-    readings = list(range(40, 451))
+    """Compare text and both rendered colours from 40 to 450 mg/dL in the default daytime card configuration.
+
+    Stock stores sgv as `Number(sgv)`, so fractional readings either side of each threshold are included.
+    """
+    readings = list(range(40, 451)) + FRACTIONAL_READINGS
     shown = await _render_card_cases(hass, stock, seeded, readings)
-    native = _native_display(stock, native_lib, readings, paint=True)
+    native = _native_display(stock, native_lib, readings, paint=True, now=_render_now(seeded))
 
     approved = approved_exceptions()
     mismatches = []
@@ -430,9 +465,9 @@ async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seed
 
 async def test_card_display_limits_match_nightscout(hass: HomeAssistant, stock, seeded, native_lib):
     """Compare the presentation boundaries without using range colour or alarm expectations."""
-    readings = [39, 40, 400, 401]
+    readings = [39, 40, 40.5, 399.9, 400, 400.1, 401]
     shown = await _render_card_cases(hass, stock, seeded, readings)
-    native = _native_display(stock, native_lib, readings)
+    native = _native_display(stock, native_lib, readings, now=_render_now(seeded))
     approved = approved_exceptions()
     mismatches = []
     for mgdl, card, ns in zip(readings, shown, native, strict=True):
@@ -545,6 +580,13 @@ async def test_card_change_text_matches_nightscout(hass: HomeAssistant, stock, s
     now = datetime.fromisoformat(case["last"]["state"]) + timedelta(minutes=1)
     [card] = node(HERE / "js" / "card_render.mjs", {"card": str(CARD), "now": now.isoformat(), "cases": [case]})
     assert "display" in delta, f"stock sent no delta.display for the seeded readings: {delta}"
+    bgnow = stock.get("/api/v2/properties/bgnow").get("bgnow") or {}
+    sent = case["delta"]["attributes"]
+    inputs = {"site_display": delta["display"], "recent_mean_mgdl": bgnow.get("mean"),
+              "previous_mean_mgdl": delta.get("mean5MinsAgo")}
+    wrong = [{"what": "change input", "attribute": name, "nightscout": value, "integration": sent.get(name)}
+             for name, value in inputs.items() if sent.get(name) != value]
+    assert not wrong, report(wrong)
     assert card["delta"] == delta["display"], report([{
         "what": "change text", "site_units": settings["units"], "nightscout": delta["display"], "card": card["delta"],
     }])
@@ -562,3 +604,106 @@ async def test_newest_entry_labelled_mmol_is_not_a_reading(hass: HomeAssistant, 
         "what": "newest mmol-labelled entry", "stock_bgnow": bgnow, "integration": state.state,
         "note": "Nightscout shows no current reading here; the integration shows one",
     }])
+
+
+async def test_card_freshness_matches_nightscout_timeago(hass: HomeAssistant, stock, seeded, native_lib):
+    """Either side of the site's Time Ago limits, the card is current exactly when Nightscout's timeago says so.
+
+    Nightscout drops the range colour once timeago.checkStatus is not "current" (adjustCurrentSGVClasses), so the
+    stale state and the rendered colours are both compared, 1 ms before, at and 1 ms after each enabled limit.
+    """
+    settings = stock.get("/api/v1/status.json")["settings"]
+    # timeago.checkStatus: `mins = settings.alarmTimeago<Level>Mins || default`, then JS arithmetic. Environment
+    # overrides are served as strings (ALARM_TIMEAGO_WARN_MINS=20 serves "20"), defaults as numbers.
+    defaults = {"Warn": 15, "Urgent": 30}
+    limits = [float(settings.get(f"alarmTimeago{level}Mins") or defaults[level]) for level in defaults
+              if settings.get(f"alarmTimeago{level}")]
+    assert limits, f"profile {stock.profile} has no Time Ago limit to test: {settings}"
+    ages = sorted({int(minutes * 60000) + offset for minutes in limits for offset in (-1, 0, 1)})
+    readings = [120] * len(ages)
+    shown = await _render_card_cases(hass, stock, seeded, readings, ages_ms=ages)
+    native = _native_display(stock, native_lib, [{"mgdl": 120, "ageMs": age} for age in ages], paint=True,
+                             now=_render_now(seeded))
+    mismatches = []
+    for age, card, ns in zip(ages, shown, native, strict=True):
+        card_current = not str(card["ariaLabel"] or "").startswith("No recent")
+        if card_current != (ns["status"] == "current"):
+            mismatches.append({"what": "freshness", "age_ms": age, "nightscout": ns["status"],
+                               "card": "current" if card_current else "stale"})
+        expected = {name: _css_colour(colour) for name, colour in ns["paint"].items()}
+        actual = {name: _css_colour(colour) for name, colour in card["paint"].items()}
+        if actual != expected:
+            mismatches.append({"what": "freshness paint", "age_ms": age, "nightscout": expected, "card": actual})
+    assert not mismatches, report(mismatches)
+
+
+async def test_cgm_error_codes_show_what_nightscout_shows(hass: HomeAssistant, stock, seeded, native_lib):
+    """A newest raw CGM error code is what Nightscout shows (updateCurrentSGV), until a real reading follows it.
+
+    9 shows an empty value (hourglass), other codes below 39 show errorcodes.toDisplay, and the next valid
+    reading shows its number again. The glucose sensor must not report a reading while an error is newest.
+    """
+    device = "parity-error-codes"
+    collection = "/api/v1/entries.json?" + urlencode({"find[device]": device, "count": 20})
+    assert not stock.get(collection), "error-code test entries were already present"
+    start = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=4)
+    sequence = [9, 10, 38, 1, 120]  # 120: recovery to a valid reading
+    entry = None
+    mismatches = []
+    try:
+        for index, mgdl in enumerate(sequence):
+            when = start + timedelta(seconds=50 * index)
+            row = {"type": "sgv", "sgv": mgdl, "date": int(when.timestamp() * 1000), "dateString": _iso(when),
+                   "direction": "Flat", "device": device}
+            stock.post("/api/v1/entries", [row])
+            _wait_for_bgnow(
+                stock,
+                lambda bg: any(r.get("mills") == row["date"] for r in bg.get("sgvs", []) + bg.get("errors", []))
+                and (mgdl < 39 or bg.get("mills") == row["date"]),
+                f"report the newest entry ({mgdl})",
+            )
+            if entry is None:
+                entry = await _setup(hass, stock)
+            else:
+                await entry.runtime_data.async_refresh()
+                await hass.async_block_till_done()
+            glucose = hass.states.get("sensor.parity_glucose")
+            last = hass.states.get("sensor.parity_last_reading")
+            assert glucose is not None and last is not None
+            [ns] = _native_display(stock, native_lib, [mgdl])
+            [card] = node(HERE / "js" / "card_render.mjs", {
+                "card": str(CARD), "now": (when + timedelta(seconds=30)).isoformat(),
+                "cases": [{"glucose": glucose.as_dict(), "last": last.as_dict()}],
+            })
+            if card["text"] != ns["text"]:
+                mismatches.append({"what": "error-code text" if mgdl < 39 else "recovery text", "mgdl": mgdl,
+                                   "nightscout": ns["text"], "card": card["text"]})
+            if mgdl < 39 and glucose.state not in ("unknown", "unavailable"):
+                mismatches.append({"what": "error code reported as a reading", "mgdl": mgdl,
+                                   "integration": glucose.state})
+            if mgdl >= 39 and glucose.state in ("unknown", "unavailable"):
+                mismatches.append({"what": "no reading after recovery", "mgdl": mgdl, "integration": glucose.state})
+    finally:
+        for row in stock.get(collection):
+            entry_id = row["_id"]
+            assert re.fullmatch("[0-9a-fA-F]{24}", entry_id), "stock did not return a MongoDB entry ID"
+            stock.delete(f"/api/v1/entries/{entry_id}")
+        assert not stock.get(collection)
+        baseline = seeded["readings"][-1]["date"]
+        _wait_for_bgnow(stock, lambda bg: bg.get("mills") == baseline, "restore bgnow after the error-code case")
+    assert not mismatches, report(mismatches)
+
+
+def test_card_change_text_grid_matches_nightscout(native_lib):
+    """The card's change text equals Nightscout's bgnow.calcDelta display for every reading pair in the grid.
+
+    Recent 40-400 mg/dL against every previous within 29 mg/dL, on mg/dL and mmol sites, shown in both units.
+    """
+    result = node(HERE / "js" / "delta_grid.mjs", {
+        "lib": str(native_lib), "card": str(CARD), "low": 40, "high": 400, "maxStep": 29,
+    })
+    assert result["checked"] == 361 * 59 * 4, f"the grid did not cover every case: {result['checked']}"
+    assert result["mismatchCount"] == 0, (
+        f"{result['mismatchCount']} of {result['checked']} change texts differ from Nightscout\n"
+        + report(result["mismatches"])
+    )

@@ -42,13 +42,16 @@ def _kinds(entry: dict) -> str:
 
 def _status(entry: dict | None) -> str:
     if entry is None:
-        return "not run"
+        return "**no result**"
     return {"passed": "matches native", "failed": "differs", "skipped": "not applicable"}[entry["outcome"]]
 
 
 def _meaning(legacy: dict | None, current: dict | None) -> str:
     legacy_outcome = legacy["outcome"] if legacy else None
     current_outcome = current["outcome"] if current else None
+    if current is None:
+        # A check with no recorded current result never counts as a match or a correction.
+        return "**current incomplete: no result recorded, blocks merge**"
     if current_outcome == "failed":
         regression = " (regression: legacy matched)" if legacy_outcome == "passed" else ""
         return "**current differs: blocks merge**" + regression
@@ -129,8 +132,14 @@ def render(current: dict, legacy: dict, exceptions: dict) -> str:
             lines.append(f"- **{exception_id}**: {record['decision']} [approval]({record['approval']})")
 
     failing = [n for n in names if (current["tests"].get(n) or {}).get("outcome") == "failed"]
+    incomplete = [n for n in names if n not in current["tests"]]
     lines += ["", "## Current failures", ""]
-    if not failing:
+    if current.get("missing") or current.get("exit_status") not in (0, 1) or incomplete:
+        reason = ("the current run produced no report" if current.get("missing")
+                  else f"pytest exited {current.get('exit_status')} (collection or harness error)"
+                  if current.get("exit_status") not in (0, 1) else f"{len(incomplete)} check(s) have no current result")
+        lines.append(f"- **Incomplete run: {reason}.** Nothing below proves a match; the merge stays blocked.")
+    if not failing and not incomplete and current.get("exit_status") == 0 and not current.get("missing"):
         lines.append("None. Current matches native everywhere checked, apart from the owner decisions above.")
     for name in failing:
         entry = current["tests"][name]

@@ -34,8 +34,28 @@ PRODUCT_PATHS = ("custom_components/",)
 EXEMPT_AUTHORS = {"dependabot[bot]"}
 
 
+def _sections(body: str) -> dict[str, str]:
+    """Map each `## ` heading line to the text under it, with HTML comments removed."""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL).splitlines():
+        if line.startswith("## "):
+            current = line.strip()
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    return {heading: "\n".join(lines).strip() for heading, lines in sections.items()}
+
+
 def template_errors(body: str) -> list[str]:
-    errors = [f"missing section: {heading}" for heading in REQUIRED_HEADINGS if heading not in body]
+    sections = _sections(body)
+    errors = []
+    for required in REQUIRED_HEADINGS:
+        heading = next((h for h in sections if h == required or h.startswith(required + " ")), None)
+        if heading is None:
+            errors.append(f"missing section: {required}")
+        elif not sections[heading]:
+            errors.append(f"empty section (write the content, or N/A with a reason): {required}")
     errors += [f"unfilled template placeholder: {text}" for text in PLACEHOLDERS if text in body]
     return errors
 
