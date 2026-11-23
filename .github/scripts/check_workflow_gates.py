@@ -13,9 +13,7 @@ LINT = "./.github/workflows/workflow-lint.yml"
 SCAN = "./.github/workflows/codeql-scan.yml"
 PARITY = "./.github/workflows/parity.yml"
 SUCCESS = "needs.preflight.result == 'success'"
-READY = "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'converted_to_draft'))"
 OPT_IN = "vars.CODEQL_ADVANCED_ENABLED == 'true'"
-DOC_PATHS = ["docs/**", "README.md", "CHANGELOG.md", "SECURITY.md"]
 READ = {"contents": "read"}
 SECURITY_WRITE = {**READ, "security-events": "write"}
 KNOWN_VALIDATE_JOBS = {"preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha", "codeql"}
@@ -53,7 +51,7 @@ def caller(filename):
     return f"startsWith(github.workflow_ref, format('{{0}}/.github/workflows/{filename}@', github.repository))"
 
 
-def check_lint_job(job, error):
+def check_lint_job(job, error, has_parity):
     if set(job) != {"runs-on", "timeout-minutes", "steps"} or job.get("runs-on") != "ubuntu-24.04":
         error("preflight runner must be the unconditional hosted Ubuntu lint job")
     timeout = job.get("timeout-minutes")
@@ -83,12 +81,18 @@ def check_lint_job(job, error):
         error("preflight must check out the workflow commit without persistent credentials")
     gate_step = steps[2]
     gate_run = gate_step.get("run") if isinstance(gate_step, dict) else None
-    if not isinstance(gate_run, str) or gate_run.splitlines() != [
+    commands = [
         "python -m pip --disable-pip-version-check install --only-binary :all: --require-hashes "
         "-r .github/scripts/requirements-preflight.txt",
         "python .github/scripts/check_workflow_gates.py",
         "python .github/scripts/test_workflow_gates.py",
-    ]:
+    ]
+    if has_parity:
+        commands.extend([
+            "python -m pip --disable-pip-version-check install --only-binary :all: -r tests_parity/requirements.txt",
+            "python -m pytest --noconftest -c /dev/null -q tests_parity/test_stock_contract.py",
+        ])
+    if not isinstance(gate_run, str) or gate_run.splitlines() != commands:
         error("preflight must execute the repository workflow gate checker and its controls")
 
 
@@ -110,7 +114,8 @@ def check_entry_jobs(name, jobs, has_parity, error):
             continue
         if job.get("needs") not in ("preflight", ["preflight"]):
             error(f"{job_id} must directly need preflight")
-        condition = SUCCESS + (f" && {READY}" if name == "validate.yml" else "")
+        # Every job runs on every push and pull request once preflight passes: no path or draft skips.
+        condition = SUCCESS
         is_scan = (name, job_id) in {("validate.yml", "codeql"), ("codeql.yml", "scan")}
         if is_scan:
             condition += f" && {OPT_IN}"
@@ -137,11 +142,8 @@ def validate(root):
     errors = []
     triggers = {
         "validate.yml": {
-            "push": {"branches": ["main"], "paths-ignore": DOC_PATHS},
-            "pull_request": {
-                "types": ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"],
-                "paths-ignore": DOC_PATHS,
-            },
+            "push": {"branches": ["main"]},
+            "pull_request": {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
             "schedule": [{"cron": "0 6 * * 1"}],
             "workflow_dispatch": None,
         },
@@ -198,7 +200,7 @@ def validate(root):
             if jobs.keys() != {"workflow-lint"}:
                 error("preflight must contain one lint job")
             else:
-                check_lint_job(jobs["workflow-lint"], error)
+                check_lint_job(jobs["workflow-lint"], error, has_parity)
             continue
 
         # These workflow_call-only leaves inherit the preflight edge in each
