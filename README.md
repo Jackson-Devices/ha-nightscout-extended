@@ -82,7 +82,8 @@ name: Sam
 - **Big numeric reading, trend arrow and change**, with how long ago it was taken and a bar that empties as it gets
   older. Readings such as 39 and 401 mg/dL stay numeric in either display unit.
 - **Colours follow your Nightscout glucose ranges** (`BG_LOW`, `BG_TARGET_BOTTOM`, `BG_TARGET_TOP`, `BG_HIGH`).
-  The card turns grey with a warning once there's been no reading for 15 minutes.
+  By default they also follow your site's Nightscout theme, exactly as Nightscout's own display does; see
+  [Colour modes](#colour-modes). The card shows a warning once there's been no reading for 15 minutes.
 - **A separate alarm badge** shows an active Low, Urgent low, High or Urgent high threshold alarm. It disappears
   when the reading is no longer fresh or the alarm clears. The badge and its accessible text stay separate from
   the reading and its colour.
@@ -109,9 +110,31 @@ appear at the wrong scale until they leave the chart window.
 | `show_chart`, `show_footer`, `show_clock` | `true` | Turn parts off |
 | `night_mode` | `true` | Dim to coloured text on black at night |
 | `night_start`, `night_end` | `21`, `7` | Night hours (0–23) |
-| `stale_minutes` | `15` | Minutes without a reading before the card turns grey |
+| `stale_minutes` | `15` | Minutes without a reading before the card shows it as stale |
+| `colour_mode` | `site` | How readings are coloured; see [Colour modes](#colour-modes) |
+| `colour_urgent`, `colour_warning`, `colour_inrange` | none | Colours for `custom_three`, e.g. `"#d32f2f"` |
+| `colour_urgent_low`, `colour_low`, `colour_in_range`, `colour_high`, `colour_urgent_high` | none | Colours for `custom_five` |
 
 For a full-screen display, put the card alone in a **panel** view and set `fill_screen: true`.
+
+### Colour modes
+
+Every mode decides **which range a reading is in** the same way: raw mg/dL against your site's thresholds,
+as Nightscout does. Modes change only how that range is painted.
+
+| `colour_mode` | Looks like |
+|---|---|
+| `site` (default) | **Matches Nightscout.** Black background; the reading is red when urgent, yellow for a warning and green when in range, using Nightscout's own stylesheet colours. Your site's `THEME` decides which ranges are coloured, as on the Nightscout page: `default` colours nothing, `colorblindfriendly` colours urgent and warning only, `colors` colours all three. |
+| `three` | Nightscout's three colours (urgent, warning, in range), whatever your site's theme |
+| `five` | The card's own five full-background colours (urgent low, low, in range, high, urgent high), with coloured text on black at night |
+| `custom_three` | Like `three`, with your colours: `colour_urgent`, `colour_warning`, `colour_inrange` |
+| `custom_five` | Like `five`, with your colours: `colour_urgent_low`, `colour_low`, `colour_in_range`, `colour_high`, `colour_urgent_high` |
+
+Only `site` matches Nightscout's display. The others are opt-in differences the repository owner approved.
+Custom colours are hex (`"#d32f2f"` or `"#d33"`); the card editor's colour pickers produce them for you. They're
+in the editor's *Custom colours* section, which is used only by the custom modes. A custom mode with a missing or
+invalid colour shows a configuration error instead of guessing one. A reading that isn't current is shown without
+a range colour, like Nightscout.
 
 ### Local threshold alarms
 

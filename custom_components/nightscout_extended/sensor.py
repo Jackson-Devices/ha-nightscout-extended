@@ -284,4 +284,9 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
             attrs["simple_alarm"] = alarm
             attrs["simple_alarm_until"] = expiry.isoformat() if expiry is not None else None
             attrs["alarm_thresholds_mgdl"] = settings["thresholds_mgdl"] if settings is not None else None
+            # For the card's default colour mode: Nightscout's display theme, passed through unchanged.
+            site_settings = self.coordinator.status.get("settings")
+            theme = site_settings.get("theme") if isinstance(site_settings, dict) else None
+            if isinstance(theme, str):
+                attrs["site_theme"] = theme
         return attrs

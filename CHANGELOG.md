@@ -6,6 +6,9 @@ Add a section here before tagging a release.
 ## [0.3.3] - 2026-11-22
 
 ### Added
+- **Glucose card colour modes.** By default (`colour_mode: site`) the card now paints readings exactly like
+  Nightscout's own display, following your site's theme. `three`, `five`, `custom_three` and `custom_five` are
+  available in the card editor. The glucose sensor has a new `site_theme` attribute for this.
 - **Glucose card** shows active low and high threshold alarms in a separate, accessible badge. Home Assistant
   uses the site's settings by default and provides individually clearable mg/dL threshold overrides in
   **Configure**. The integration sends no notifications and makes no changes to Nightscout.

@@ -44,6 +44,19 @@ const NIGHT_FG = {
   in_range: "#f3e7a6", high: "#ffd84d", urgent_high: "#ff8a7a",
 };
 
+// Nightscout 15.0.6 current-reading paint (static/css/main.css): body { background: #000; color: #bdbdbd },
+// .urgent .bgButton { color: red }, .warning .bgButton { color: yellow }, .inrange .bgButton { color: #4cff00 }.
+// The class comes from lib/client/index.js sgvToColoredRange, which depends on settings.theme.
+const NS_PAINT = { background: "#000000", none: "#bdbdbd", urgent: "#ff0000", warning: "#ffff00", inrange: "#4cff00" };
+const LEVEL_CLASS = {
+  urgent_low: "urgent", low: "warning", in_range: "inrange", high: "warning", urgent_high: "urgent",
+};
+const COLOUR_MODES = ["site", "three", "five", "custom_three", "custom_five"];
+const CUSTOM_KEYS = {
+  custom_three: ["urgent", "warning", "inrange"],
+  custom_five: ["urgent_low", "low", "in_range", "high", "urgent_high"],
+};
+
 const ALARM_LABELS = new Map([
   ["urgent_low", "Urgent low alarm"],
   ["low", "Low alarm"],
@@ -62,6 +75,7 @@ const DEFAULT_CONFIG = {
   show_clock: true,
   fill_screen: false,
   text_size: 100,
+  colour_mode: "site",
 };
 
 const CHART_LO = 40;   // mg/dL at the bottom of the chart
@@ -86,6 +100,43 @@ export const logic = {
   },
   colors(level, night) {
     return night ? { bg: "#000000", fg: NIGHT_FG[level] } : DAY[level];
+  },
+  /** Nightscout's range class for a card level: sgvToColoredRange semantics, including the site theme. */
+  nativeClass(level, theme) {
+    if (level === "stale" || theme === "default") return "";
+    if (level === "in_range") return theme === "colors" ? "inrange" : "";
+    return LEVEL_CLASS[level] || "";
+  },
+  /** Background and foreground for a level in the configured colour mode. */
+  paint(level, cfg, theme, night) {
+    const mode = cfg.colour_mode;
+    if (mode === "five") return logic.colors(level, night);
+    if (mode === "custom_five") {
+      if (level === "stale") return logic.colors("stale", night);
+      const colour = cfg.custom_colours[level];
+      return night ? { bg: "#000000", fg: colour } : { bg: colour, fg: logic.contrast(colour) };
+    }
+    const cls = mode === "site" ? logic.nativeClass(level, theme) : level === "stale" ? "" : LEVEL_CLASS[level];
+    const fg = !cls ? NS_PAINT.none : mode === "custom_three" ? cfg.custom_colours[cls] : NS_PAINT[cls];
+    return { bg: NS_PAINT.background, fg };
+  },
+  /** Readable text colour on a custom background. */
+  contrast(hex) {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? "#1f1f1f" : "#ffffff";
+  },
+  /** Normalise a configured colour (#rgb, #rrggbb or the editor's [r, g, b]) to #rrggbb, or null if invalid. */
+  hexColour(value) {
+    if (Array.isArray(value) && value.length === 3
+        && value.every((c) => Number.isInteger(c) && c >= 0 && c <= 255)) {
+      return "#" + value.map((c) => c.toString(16).padStart(2, "0")).join("");
+    }
+    if (typeof value !== "string") return null;
+    const text = value.trim().toLowerCase();
+    if (/^#[0-9a-f]{6}$/.test(text)) return text;
+    if (/^#[0-9a-f]{3}$/.test(text)) return "#" + [...text.slice(1)].map((c) => c + c).join("");
+    return null;
   },
   formatDelta(delta, mmol) {
     if (!Number.isFinite(delta)) return "";
@@ -168,6 +219,25 @@ class NightscoutGlucoseCard extends HTMLElement {
         { name: "hours_to_show", selector: { number: { min: 1, max: 24, mode: "box" } } },
         { name: "text_size", selector: { number: { min: 50, max: 300, step: 10, mode: "slider", unit_of_measurement: "%" } } },
         {
+          name: "colour_mode",
+          selector: { select: { mode: "dropdown", options: [
+            { value: "site", label: "Site theme (matches Nightscout)" },
+            { value: "three", label: "Nightscout 3 colours" },
+            { value: "five", label: "Card 5 colours" },
+            { value: "custom_three", label: "Custom 3 colours" },
+            { value: "custom_five", label: "Custom 5 colours" },
+          ] } },
+        },
+        {
+          name: "",
+          type: "expandable",
+          title: "Custom colours (used only by the custom modes)",
+          schema: [
+            ...CUSTOM_KEYS.custom_three.map((key) => ({ name: `colour_${key}`, selector: { color_rgb: {} } })),
+            ...CUSTOM_KEYS.custom_five.map((key) => ({ name: `colour_${key}`, selector: { color_rgb: {} } })),
+          ],
+        },
+        {
           name: "",
           type: "grid",
           schema: [
@@ -186,6 +256,15 @@ class NightscoutGlucoseCard extends HTMLElement {
         fill_screen: "Fill the screen (for a panel view on a kiosk)",
         hours_to_show: "Hours of history in the chart",
         text_size: "Size of the clock, age, name and IOB / COB line",
+        colour_mode: "Colours",
+        colour_urgent: "Custom 3: urgent",
+        colour_warning: "Custom 3: warning",
+        colour_inrange: "Custom 3: in range",
+        colour_urgent_low: "Custom 5: urgent low",
+        colour_low: "Custom 5: low",
+        colour_in_range: "Custom 5: in range",
+        colour_high: "Custom 5: high",
+        colour_urgent_high: "Custom 5: urgent high",
         show_chart: "Chart",
         show_footer: "IOB / COB / forecast line",
         show_clock: "Clock",
@@ -205,6 +284,21 @@ class NightscoutGlucoseCard extends HTMLElement {
     }
     cfg.hours_to_show = Math.min(48, Math.max(1, cfg.hours_to_show));
     cfg.text_size = Math.min(400, Math.max(25, cfg.text_size));
+    if (!COLOUR_MODES.includes(cfg.colour_mode)) {
+      throw new Error(`colour_mode must be one of: ${COLOUR_MODES.join(", ")}`);
+    }
+    cfg.custom_colours = {};
+    if (CUSTOM_KEYS[cfg.colour_mode]) {
+      const problems = [];
+      for (const key of CUSTOM_KEYS[cfg.colour_mode]) {
+        const option = `colour_${key}`;
+        const colour = logic.hexColour(cfg[option]);
+        if (cfg[option] === undefined || cfg[option] === null || cfg[option] === "") problems.push(`${option} is missing`);
+        else if (!colour) problems.push(`${option} must be a colour like #33aa55`);
+        else cfg.custom_colours[key] = colour;
+      }
+      if (problems.length) throw new Error(`colour_mode ${cfg.colour_mode}: ${problems.join("; ")}`);
+    }
     this._config = cfg;
     this._history = { t: 0, key: null, pts: [], busy: false };
     if (this._root) this._render();
@@ -409,7 +503,9 @@ class NightscoutGlucoseCard extends HTMLElement {
     const level = logic.classify(comparisonValue, ageMin, cfg.stale_minutes, t, comparisonDivisor);
     const stale = level === "stale";
     const night = logic.isNight(new Date().getHours(), cfg);
-    const c = logic.colors(level, night);
+    const theme = g.attributes?.site_theme;
+    const themeMissing = cfg.colour_mode === "site" && typeof theme !== "string";
+    const c = logic.paint(themeMissing ? "stale" : level, cfg, theme, night);
 
     el.wrap.style.setProperty("--ngc-bg", c.bg);
     el.wrap.style.setProperty("--ngc-fg", c.fg);
@@ -442,6 +538,7 @@ class NightscoutGlucoseCard extends HTMLElement {
     if (cfg.show_footer) {
       const parts = [];
       if (stale) parts.push("⚠ No recent reading");
+      if (themeMissing) parts.push("⚠ Site theme unavailable: update the integration or pick a colour mode");
       const iob = num(this._state("iob"));
       const cob = num(this._state("cob"));
       const fc = displayGlucose(this._state("forecast"), mmol);

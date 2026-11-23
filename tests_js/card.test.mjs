@@ -73,6 +73,8 @@ function setupCard(config = {}) {
     show_clock: false,
     night_mode: false,
     stale_minutes: 15,
+    // These tests check classification through the card's 5-colour palette; colour modes have their own tests.
+    colour_mode: "five",
     ...config,
   });
   return card;
@@ -461,4 +463,88 @@ test("card version matches manifest.json, so browsers reload it after an update"
   const { CARD_VERSION } = await import("../custom_components/nightscout_extended/www/nightscout-glucose-card.js");
   const manifest = JSON.parse(await readFile(new URL("../custom_components/nightscout_extended/manifest.json", import.meta.url)));
   assert.equal(CARD_VERSION, manifest.version);
+});
+
+
+// ---- colour modes (AC-1.15) --------------------------------------------------------------------------------
+
+const LEVELS = ["urgent_low", "low", "in_range", "high", "urgent_high"];
+
+test("site mode follows Nightscout's sgvToColoredRange classes and stylesheet for each theme", () => {
+  const cfg = { colour_mode: "site" };
+  const expected = {
+    colors: ["#ff0000", "#ffff00", "#4cff00", "#ffff00", "#ff0000"],
+    colorblindfriendly: ["#ff0000", "#ffff00", "#bdbdbd", "#ffff00", "#ff0000"],
+    default: ["#bdbdbd", "#bdbdbd", "#bdbdbd", "#bdbdbd", "#bdbdbd"],
+  };
+  for (const [theme, colours] of Object.entries(expected)) {
+    LEVELS.forEach((level, i) => {
+      for (const night of [false, true]) {
+        assert.deepEqual(logic.paint(level, cfg, theme, night), { bg: "#000000", fg: colours[i] }, `${theme} ${level}`);
+      }
+    });
+    assert.deepEqual(logic.paint("stale", cfg, theme, false), { bg: "#000000", fg: "#bdbdbd" });
+  }
+});
+
+test("three mode uses Nightscout's three classes whatever the site theme", () => {
+  const cfg = { colour_mode: "three" };
+  for (const theme of ["default", "colorblindfriendly", "colors"]) {
+    assert.deepEqual(LEVELS.map((level) => logic.paint(level, cfg, theme, false).fg),
+      ["#ff0000", "#ffff00", "#4cff00", "#ffff00", "#ff0000"]);
+  }
+});
+
+test("five mode keeps the card palette, including night mode", () => {
+  for (const level of [...LEVELS, "stale"]) {
+    for (const night of [false, true]) {
+      assert.deepEqual(logic.paint(level, { colour_mode: "five" }, "default", night), logic.colors(level, night));
+    }
+  }
+});
+
+test("modes never change which Nightscout class a reading is in", () => {
+  // five's levels split Nightscout's urgent/warning by direction; they must agree with three's classes.
+  const three = LEVELS.map((level) => logic.paint(level, { colour_mode: "three" }, "colors", false).fg);
+  const classOf = { "#ff0000": "urgent", "#ffff00": "warning", "#4cff00": "inrange" };
+  assert.deepEqual(three.map((fg) => classOf[fg]), ["urgent", "warning", "inrange", "warning", "urgent"]);
+});
+
+test("custom modes apply the configured colours and accept the editor's RGB lists", () => {
+  const three = setupCard({ colour_mode: "custom_three", colour_urgent: "#a00", colour_warning: [200, 150, 0],
+    colour_inrange: "#00AA44" })._config;
+  assert.deepEqual(LEVELS.map((level) => logic.paint(level, three, "default", false).fg),
+    ["#aa0000", "#c89600", "#00aa44", "#c89600", "#aa0000"]);
+  assert.equal(logic.paint("stale", three, "default", false).fg, "#bdbdbd");
+
+  const five = setupCard({ colour_mode: "custom_five", colour_urgent_low: "#000080", colour_low: "#4040ff",
+    colour_in_range: "#ffffff", colour_high: "#ffa500", colour_urgent_high: "#800000" })._config;
+  assert.deepEqual(logic.paint("in_range", five, "default", false), { bg: "#ffffff", fg: "#1f1f1f" });
+  assert.deepEqual(logic.paint("urgent_low", five, "default", false), { bg: "#000080", fg: "#ffffff" });
+  assert.deepEqual(logic.paint("high", five, "default", true), { bg: "#000000", fg: "#ffa500" });
+});
+
+test("a missing or invalid custom colour, or an unknown mode, is a visible configuration error", () => {
+  assert.throws(() => setupCard({ colour_mode: "custom_three", colour_urgent: "#f00", colour_warning: "#ff0" }),
+    /colour_inrange is missing/);
+  assert.throws(() => setupCard({ colour_mode: "custom_five", colour_urgent_low: "blue", colour_low: "#00f",
+    colour_in_range: "#0f0", colour_high: "#ff0", colour_urgent_high: "#f00" }), /colour_urgent_low must be a colour/);
+  assert.throws(() => setupCard({ colour_mode: "rainbow" }), /colour_mode must be one of/);
+});
+
+test("the default colour mode is site", () => {
+  const card = new CardClass();
+  card.setConfig({});
+  assert.equal(card._config.colour_mode, "site");
+});
+
+test("the editor offers every colour mode and the custom colour pickers", () => {
+  const form = CardClass.getConfigForm();
+  const mode = form.schema.find((field) => field.name === "colour_mode");
+  assert.deepEqual(mode.selector.select.options.map((option) => option.value),
+    ["site", "three", "five", "custom_three", "custom_five"]);
+  const pickers = form.schema.find((field) => field.type === "expandable").schema.map((field) => field.name);
+  assert.deepEqual(pickers, ["colour_urgent", "colour_warning", "colour_inrange", "colour_urgent_low", "colour_low",
+    "colour_in_range", "colour_high", "colour_urgent_high"]);
+  for (const name of ["colour_mode", ...pickers]) assert.ok(form.computeLabel({ name }), `label for ${name}`);
 });
