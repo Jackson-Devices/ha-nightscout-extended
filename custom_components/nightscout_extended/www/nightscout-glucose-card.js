@@ -57,6 +57,10 @@ const CUSTOM_KEYS = {
   custom_five: ["urgent_low", "low", "in_range", "high", "urgent_high"],
 };
 
+// Nightscout 15.0.6 lib/plugins/errorcodes.js code2Display; any other code shows as `${code}??`.
+// lib/client/index.js updateCurrentSGV shows code 9 as an empty reading with an hourglass.
+const CGM_ERROR_TEXT = { 1: "?SN", 2: "?MD", 3: "?NA", 5: "?NC", 6: "?CD", 9: "?AD", 10: "???", 12: "?RF" };
+
 const ALARM_LABELS = new Map([
   ["urgent_low", "Urgent low alarm"],
   ["low", "Low alarm"],
@@ -138,12 +142,44 @@ export const logic = {
     if (/^#[0-9a-f]{3}$/.test(text)) return "#" + [...text.slice(1)].map((c) => c + c).join("");
     return null;
   },
+  /** Nightscout's change text (lib/plugins/bgnow.js): `(v >= 0 ? '+' : '') + v`, v rounded for the unit. */
   formatDelta(delta, mmol) {
     if (!Number.isFinite(delta)) return "";
     const v = mmol ? Math.round(delta * 10) / 10 : Math.round(delta);
-    if (v === 0) return "±0";
-    const text = mmol ? Math.abs(v).toFixed(1) : String(Math.abs(v));
-    return (v > 0 ? "+" : "−") + text;
+    return (v >= 0 ? "+" : "") + String(v === 0 ? 0 : v);
+  },
+  /** Nightscout's mgdlToMMOL as a number: round(x / 18.01559, 1 dp). */
+  nsMmol(mgdl) {
+    return Number((Math.round((mgdl / NIGHTSCOUT_MGDL_PER_MMOL) * 10) / 10).toFixed(1));
+  },
+  /**
+   * Change text exactly as Nightscout computes it (bgnow.js calcDelta): the server's own display when the card
+   * shows the site's unit, otherwise each mean rounded to the display unit before subtracting.
+   */
+  deltaText(attrs, mmol, fallback) {
+    const siteMmol = /mmol/i.test(attrs?.site_units || "");
+    if (typeof attrs?.site_display === "string" && attrs.site_units !== undefined && siteMmol === mmol) {
+      return attrs.site_display;
+    }
+    const recent = attrs?.recent_mean_mgdl;
+    const previous = attrs?.previous_mean_mgdl;
+    if (Number.isFinite(recent) && Number.isFinite(previous)) {
+      const v = mmol
+        ? Math.round((logic.nsMmol(recent) - logic.nsMmol(previous)) * 10) / 10
+        : Math.round(recent - previous);
+      return (v >= 0 ? "+" : "") + String(v === 0 ? 0 : v);
+    }
+    return logic.formatDelta(fallback, mmol);
+  },
+  /** Minutes after which a reading is no longer current: card override, else Nightscout's Time Ago limits. */
+  staleAfter(cfg, attrs) {
+    if (cfg.stale_override) return cfg.stale_minutes;
+    const limits = [attrs?.timeago_warn_minutes, attrs?.timeago_urgent_minutes];
+    if (limits.some((v) => v !== undefined)) {
+      const enabled = limits.filter((v) => Number.isFinite(v));
+      return enabled.length ? Math.min(...enabled) : Infinity;
+    }
+    return cfg.stale_minutes;
   },
   formatAge(ageMin) {
     if (!Number.isFinite(ageMin)) return "no data";
@@ -155,8 +191,9 @@ export const logic = {
   thresholds(attr) {
     const out = { ...DEFAULT_THRESHOLDS };
     for (const k of Object.keys(out)) {
-      const v = Number(attr && attr[k]);
-      if (Number.isFinite(v) && v > 0) out[k] = v;
+      const v = attr && attr[k];
+      // Served values are used as served, including 0 (for example BG_LOW=0).
+      if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
     }
     return out;
   },
@@ -192,6 +229,16 @@ function displayGlucose(state, mmol) {
 
 function formatGlucose(value, mmol) {
   return mmol ? (Math.round(value * 10) / 10).toFixed(1) : String(Math.round(value));
+}
+
+/** The main reading as Nightscout's scaleBg prints it: mg/dL unrounded, mmol/L by mgdlToMMOL. */
+function readingText(state, mmol) {
+  const native = state.attributes?.native_mgdl;
+  if (Number.isFinite(native) && Number.isFinite(num(state))) {
+    return mmol ? logic.nsMmol(native).toFixed(1) : String(native);
+  }
+  const displayed = displayGlucose(state, mmol);
+  return Number.isFinite(displayed) ? formatGlucose(displayed, mmol) : "---";
 }
 
 function glucoseTimeMs(glucose, last) {
@@ -278,6 +325,8 @@ class NightscoutGlucoseCard extends HTMLElement {
   setConfig(config) {
     if (!config || typeof config !== "object") throw new Error("Invalid configuration");
     const cfg = { ...DEFAULT_CONFIG, ...config };
+    // An explicit stale_minutes overrides the site's Nightscout Time Ago limits.
+    cfg.stale_override = config.stale_minutes !== undefined && config.stale_minutes !== null;
     for (const key of ["hours_to_show", "night_start", "night_end", "stale_minutes", "text_size"]) {
       cfg[key] = Number(cfg[key]);
       if (!Number.isFinite(cfg[key])) throw new Error(`${key} must be a number`);
@@ -489,18 +538,22 @@ class NightscoutGlucoseCard extends HTMLElement {
     }
 
     const mmol = isMmol(g);
+    const errorCode = g.attributes?.cgm_error_code;
+    const hasError = Number.isInteger(errorCode);
     const value = num(g);
-    const mgdl = canonicalMgdl(g);
+    // A newest raw CGM error code is what Nightscout displays and classifies (updateCurrentSGV).
+    const mgdl = hasError ? errorCode : canonicalMgdl(g);
     const last = this._state("last");
     const lastMs = glucoseTimeMs(g, last);
     const now = Date.now();
     const ageMin = (now - lastMs) / 60000;
     const t = logic.thresholds(g.attributes && g.attributes.thresholds_mgdl);
     // Compare in the stored unit to avoid a floating-point round trip.
-    const mmolFallback = mmol && Number.isFinite(mgdl) && !Number.isFinite(g.attributes?.native_mgdl);
+    const mmolFallback = !hasError && mmol && Number.isFinite(mgdl) && !Number.isFinite(g.attributes?.native_mgdl);
     const comparisonValue = mmolFallback ? value : mgdl;
     const comparisonDivisor = mmolFallback ? MGDL_PER_MMOL : 1;
-    const level = logic.classify(comparisonValue, ageMin, cfg.stale_minutes, t, comparisonDivisor);
+    const staleAfter = logic.staleAfter(cfg, g.attributes);
+    const level = logic.classify(comparisonValue, ageMin, staleAfter, t, comparisonDivisor);
     const stale = level === "stale";
     const night = logic.isNight(new Date().getHours(), cfg);
     const theme = g.attributes?.site_theme;
@@ -518,8 +571,9 @@ class NightscoutGlucoseCard extends HTMLElement {
     el.name.textContent = cfg.name || "";
     el.age.textContent = logic.formatAge(ageMin);
 
-    const displayed = displayGlucose(g, mmol);
-    el.value.textContent = Number.isFinite(displayed) ? formatGlucose(displayed, mmol) : "---";
+    el.value.textContent = hasError
+      ? (errorCode === 9 ? "" : CGM_ERROR_TEXT[errorCode] || `${errorCode}??`)
+      : readingText(g, mmol);
 
     const alarmUntil = Date.parse(g.attributes?.simple_alarm_until);
     const alarm = !stale && alarmUntil > now ? ALARM_LABELS.get(g.attributes?.simple_alarm) : undefined;
@@ -530,8 +584,11 @@ class NightscoutGlucoseCard extends HTMLElement {
     }
     const trend = this._state("trend");
     el.arrow.textContent = stale ? "" : ARROWS[trend ? trend.state : ""] || "";
-    el.delta.textContent = stale ? "" : logic.formatDelta(displayGlucose(this._state("delta"), mmol), mmol);
-    const pct = Number.isFinite(ageMin) ? Math.max(0, Math.min(100, 100 - (ageMin / cfg.stale_minutes) * 100)) : 0;
+    const deltaState = this._state("delta");
+    el.delta.textContent = stale || !deltaState || !Number.isFinite(num(deltaState))
+      ? "" : logic.deltaText(deltaState.attributes, mmol, displayGlucose(deltaState, mmol));
+    const barSpan = Number.isFinite(staleAfter) ? staleAfter : cfg.stale_minutes;
+    const pct = Number.isFinite(ageMin) ? Math.max(0, Math.min(100, 100 - (ageMin / barSpan) * 100)) : 0;
     el.fill.style.width = `${pct}%`;
 
     el.footer.hidden = !cfg.show_footer;

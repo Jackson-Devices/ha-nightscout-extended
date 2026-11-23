@@ -289,4 +289,23 @@ class NightscoutSensor(CoordinatorEntity[NightscoutCoordinator], SensorEntity):
             theme = site_settings.get("theme") if isinstance(site_settings, dict) else None
             if isinstance(theme, str):
                 attrs["site_theme"] = theme
+            # For the card's text and freshness: the site's display unit, a newest raw CGM error code, and
+            # Nightscout's Time Ago limits (None for a disabled limit).
+            if (units := self.coordinator.site_units) is not None:
+                attrs["site_units"] = units
+            if data.cgm_error_code is not None:
+                attrs["cgm_error_code"] = data.cgm_error_code
+            if (timeago := self.coordinator.timeago_minutes) is not None:
+                attrs["timeago_warn_minutes"] = timeago["warn"]
+                attrs["timeago_urgent_minutes"] = timeago["urgent"]
+        if self.entity_description.key == "glucose_delta":
+            # Nightscout's own change text and the means it is computed from (bgnow.js calcDelta).
+            attrs = {
+                **(attrs or {}),
+                "site_display": data.delta_display,
+                "recent_mean_mgdl": data.delta_recent_mean,
+                "previous_mean_mgdl": data.delta_previous_mean,
+            }
+            if (units := self.coordinator.site_units) is not None:
+                attrs["site_units"] = units
         return attrs

@@ -182,7 +182,14 @@ def test_same_seed_and_read_scope_agree_on_stock_measurements(stock, stock_versi
         assert status["version"] == STOCK_VERSION and status["status"] == "ok" and status["apiEnabled"] is True
     settings = {key: legacy_status[1]["settings"][key] for key in SETTINGS}
     assert {key: legacy_status[2]["settings"][key] for key in SETTINGS} == settings
-    assert all(type(value) in (int, float) and value >= 30 for value in settings["thresholds"].values())
+    # Served in mg/dL (lib/settings.js); stock.sh sets BG_LOW=0 for exactly one site, and a 0 stays 0.
+    thresholds = settings["thresholds"]
+    assert all(type(value) in (int, float) for value in thresholds.values())
+    assert all(value >= 30 for key, value in thresholds.items() if key != "bgLow")
+    if stock.profile == "mgdl-custom":
+        assert thresholds["bgLow"] == 0
+    else:
+        assert thresholds["bgLow"] >= 30
     assert type(settings["alarmTimeagoWarn"]) is bool
     assert type(settings["alarmTimeagoUrgent"]) is bool
     # stock.sh sets WARN_MINS in the environment for exactly one site.
@@ -477,8 +484,12 @@ async def test_stock_original_time_distinguishes_stale_from_missing(
         else:
             assert "last" not in current and "mills" not in current
             assert any((e["mgdl"], e["mills"]) == (10, seed["date"]) for e in current["errors"])
-            assert data.glucose is None and data.glucose_time is None
-            assert glucose.state == last_reading.state == STATE_UNKNOWN
+            # Stock shows the newest raw entry, errors included (client updateCurrentSGV), and times it with
+            # timeago over sbx.data.sgvs, which keeps error entries: the code is shown with the error's time.
+            assert data.glucose is None and data.cgm_error_code == 10
+            assert data.glucose_time == instant(seed["dateString"])
+            assert glucose.state == STATE_UNKNOWN
+            assert instant(last_reading.state) == instant(seed["dateString"]).replace(microsecond=0)
 
 
 def _read_stock_profiles(wire, reader):

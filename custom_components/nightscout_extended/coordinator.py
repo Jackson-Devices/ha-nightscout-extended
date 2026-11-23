@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from itertools import pairwise
 from math import isfinite
+import re
 from time import monotonic
 from typing import Literal, TypedDict
 
@@ -57,6 +58,29 @@ def finite_threshold_mgdl(value: object) -> float | None:
     try:
         number = float(value)
     except OverflowError:
+        return None
+    return number if isfinite(number) else None
+
+
+_JS_DECIMAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+
+
+def timeago_limit_minutes(value: object, default: float) -> float | None:
+    """A Time Ago limit as lib/plugins/timeago.js uses it: `Mins || default`, then JavaScript arithmetic.
+
+    Environment overrides are served as strings (ALARM_TIMEAGO_WARN_MINS=20 serves "20"), defaults as numbers.
+    Returns None when the result is not a finite number: stock's `age > NaN` is never true, so it never fires.
+    """
+    if value is None or value is False or value == "" or (isinstance(value, (int, float)) and not value):
+        value = default  # JavaScript falsy: null, false, 0, NaN, ""
+    if isinstance(value, bool):
+        number = float(value)
+    elif isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):  # Number(string): surrounding whitespace ignored, decimal notation only
+        text = value.strip()
+        number = 0.0 if not text else float(text) if _JS_DECIMAL.fullmatch(text) else float("nan")
+    else:
         return None
     return number if isfinite(number) else None
 
@@ -135,6 +159,26 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         return {"units": units, "thresholds_mgdl": thresholds, "enabled": enabled}
 
     @property
+    def site_units(self) -> str | None:
+        units = self._site_settings.get("units")
+        return units if isinstance(units, str) else None
+
+    @property
+    def timeago_minutes(self) -> dict[str, float | None] | None:
+        """Nightscout's Time Ago limits (lib/plugins/timeago.js checkStatus); None for a disabled limit."""
+        settings = self._site_settings
+        out: dict[str, float | None] = {}
+        for key, flag, minutes, default in (
+            ("warn", "alarmTimeagoWarn", "alarmTimeagoWarnMins", 15),
+            ("urgent", "alarmTimeagoUrgent", "alarmTimeagoUrgentMins", 30),
+        ):
+            enabled = settings.get(flag)
+            if not isinstance(enabled, bool):
+                return None
+            out[key] = timeago_limit_minutes(settings.get(minutes), default) if enabled else None
+        return out
+
+    @property
     def thresholds_mgdl(self) -> dict[str, float]:
         """The site's alarm thresholds (BG_LOW, BG_TARGET_BOTTOM/TOP, BG_HIGH) in mg/dL.
 
@@ -144,11 +188,9 @@ class NightscoutCoordinator(DataUpdateCoordinator[NightscoutData]):
         out = dict(DEFAULT_THRESHOLDS_MGDL)
         if isinstance(raw, dict):
             for key, field in _THRESHOLD_FIELDS.items():
-                try:
-                    value = float(raw[field])
-                except (KeyError, TypeError, ValueError, OverflowError):
-                    continue
-                if isfinite(value) and value > 0:
+                # Served values are used as served, including 0 (for example BG_LOW=0).
+                value = finite_threshold_mgdl(raw.get(field))
+                if value is not None:
                     out[key] = value
         return out
 

@@ -432,11 +432,12 @@ test("night window wraps midnight and can be turned off", () => {
 });
 
 test("delta formatting in both units", () => {
+  // Nightscout's delta.display: (v >= 0 ? '+' : '') + v (lib/plugins/bgnow.js).
   assert.equal(logic.formatDelta(6, false), "+6");
-  assert.equal(logic.formatDelta(-18, false), "−18");
-  assert.equal(logic.formatDelta(0.4, false), "±0");
+  assert.equal(logic.formatDelta(-18, false), "-18");
+  assert.equal(logic.formatDelta(0.4, false), "+0");
   assert.equal(logic.formatDelta(0.33, true), "+0.3");
-  assert.equal(logic.formatDelta(-1.05, true), "−1.0");
+  assert.equal(logic.formatDelta(-1.05, true), "-1");
   assert.equal(logic.formatDelta(NaN, false), "");
 });
 
@@ -449,8 +450,9 @@ test("age text", () => {
 
 test("thresholds fall back to Nightscout defaults per key", () => {
   assert.deepEqual(logic.thresholds(undefined), T);
-  assert.deepEqual(logic.thresholds({ low: 70, high: "200", urgent_high: -1 }),
-    { urgent_low: 55, low: 70, high: 200, urgent_high: 260 });
+  // Served numbers are used as served (stock serves numbers, and BG_LOW=0 is valid); non-numbers are not served.
+  assert.deepEqual(logic.thresholds({ urgent_low: 0, low: 70, high: "200", urgent_high: -1 }),
+    { urgent_low: 0, low: 70, high: 180, urgent_high: -1 });
 });
 
 test("night colours are coloured text on black", () => {

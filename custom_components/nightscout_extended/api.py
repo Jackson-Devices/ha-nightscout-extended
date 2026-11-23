@@ -76,6 +76,12 @@ class NightscoutData:
     alarm_glucose: float | None = None
     alarm_glucose_time: datetime | None = None
     forecast_source_time: datetime | None = None
+    # Nightscout's current-reading display shows the newest raw entry, error codes included.
+    cgm_error_code: int | None = None
+    # Nightscout's own change inputs (lib/plugins/bgnow.js calcDelta), for the card's change text.
+    delta_display: str | None = None
+    delta_recent_mean: float | None = None
+    delta_previous_mean: float | None = None
 
     def last_treatment(self, attr: str, now: datetime) -> Treatment | None:
         """The most recent treatment at or before `now` with a non-zero `attr` (carbs or insulin)."""
@@ -150,16 +156,29 @@ def parse_properties(
 
     delta = props.get("delta") or {}
     data.delta = _num(delta.get("mgdl"))
+    display = delta.get("display")
+    data.delta_display = display if isinstance(display, str) and display else None
+    data.delta_recent_mean = _num(bgnow.get("mean"))
+    data.delta_previous_mean = _num(delta.get("mean5MinsAgo"))
 
     direction = props.get("direction") or {}
     data.direction = direction.get("value") or None
     if raw is not None and raw_time is not None:
         data.alarm_glucose = _num(raw.get("mgdl"))
         data.alarm_glucose_time = raw_time
-        if data.alarm_glucose == 39 and (data.glucose_time is None or raw_time >= data.glucose_time):
-            data.glucose = data.alarm_glucose
+        # Nightscout's display shows the newest raw entry (lib/client/index.js updateCurrentSGV): 39 as a
+        # number (owner decision E-1d) and codes below 39 as CGM error codes, which are not glucose values.
+        raw_mgdl = data.alarm_glucose
+        if (raw_mgdl is not None and raw_mgdl <= 39
+                and (data.glucose_time is None or raw_time >= data.glucose_time)):
+            if raw_mgdl == 39:
+                data.glucose = raw_mgdl
+            else:
+                data.glucose = None
+                data.cgm_error_code = int(raw_mgdl) if float(raw_mgdl).is_integer() else None
             data.glucose_time = raw_time
             data.delta = None  # Stock bgnow delta uses glucose values strictly above 39.
+            data.delta_display = data.delta_recent_mean = data.delta_previous_mean = None
             raw_direction = raw.get("direction")
             data.direction = raw_direction if isinstance(raw_direction, str) and raw_direction else None
 

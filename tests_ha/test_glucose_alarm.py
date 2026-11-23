@@ -100,32 +100,35 @@ async def test_simple_alarm_uses_stock_rules(hass, aioclient_mock, freezer, unit
 
 
 @pytest.mark.parametrize(
-    ("raw", "elapsed", "site_alarms", "expected"),
+    ("raw", "elapsed", "site_alarms", "expected", "state", "error_code"),
     [
-        ([_row(401), _row(39)], 1, None, "urgent_high"),
-        ([_row(401), _row(39, -1)], 1, None, "urgent_high"),
-        ([_row(39, 3), _row(401)], 2, None, "urgent_high"),
-        ([_row(401, 3)], 2, None, None),
-        ([_row(38, 1), _row(401)], 2, None, None),
-        ([_row(420)], 1, None, None),
-        ([_row(401, 1)], 2, None, None),
-        ([], 0, None, None),
-        ([{"mgdl": 39}, _row(401)], 0, None, None),
-        ([_row(401)], 600, None, None),
-        ([_row(401)], 0, {}, None),
+        ([_row(401), _row(39)], 1, None, "urgent_high", "401", None),
+        ([_row(401), _row(39, -1)], 1, None, "urgent_high", "401", None),
+        ([_row(39, 3), _row(401)], 2, None, "urgent_high", "401", None),
+        ([_row(401, 3)], 2, None, None, "401", None),
+        # Nightscout's display shows the newest raw entry: a newer CGM error code 38 shows as "38??" and is not
+        # a glucose value, so the older 401 must not stay on screen (lib/client/index.js updateCurrentSGV).
+        ([_row(38, 1), _row(401)], 2, None, None, "unknown", 38),
+        ([_row(420)], 1, None, None, "401", None),
+        ([_row(401, 1)], 2, None, None, "401", None),
+        ([], 0, None, None, "401", None),
+        ([{"mgdl": 39}, _row(401)], 0, None, None, "401", None),
+        ([_row(401)], 600, None, None, "401", None),
+        ([_row(401)], 0, {}, None, "401", None),
     ],
 )
 async def test_alarm_uses_latest_raw_sgv_and_fails_closed(
-    hass, aioclient_mock, freezer, raw, elapsed, site_alarms, expected,
+    hass, aioclient_mock, freezer, raw, elapsed, site_alarms, expected, state, error_code,
 ):
     freezer.move_to(BASE + timedelta(seconds=elapsed))
     entry = await _setup(hass, aioclient_mock, _properties(401, raw=raw), site_alarms=site_alarms)
 
-    state = hass.states.get(GLUCOSE)
-    assert state.state == "401"
-    assert state.attributes["simple_alarm"] == expected
+    glucose = hass.states.get(GLUCOSE)
+    assert glucose.state == state
+    assert glucose.attributes.get("cgm_error_code") == error_code
+    assert glucose.attributes["simple_alarm"] == expected
     if expected is None:
-        assert state.attributes["simple_alarm_until"] is None
+        assert glucose.attributes["simple_alarm_until"] is None
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 

@@ -110,7 +110,7 @@ appear at the wrong scale until they leave the chart window.
 | `show_chart`, `show_footer`, `show_clock` | `true` | Turn parts off |
 | `night_mode` | `true` | Dim to coloured text on black at night |
 | `night_start`, `night_end` | `21`, `7` | Night hours (0–23) |
-| `stale_minutes` | `15` | Minutes without a reading before the card shows it as stale |
+| `stale_minutes` | site's Time Ago limit | Minutes without a reading before the card shows it as stale. Unset, the card follows your Nightscout site's Time Ago warning/urgent limits (15 if the integration can't read them) |
 | `colour_mode` | `site` | How readings are coloured; see [Colour modes](#colour-modes) |
 | `colour_urgent`, `colour_warning`, `colour_inrange` | none | Colours for `custom_three`, e.g. `"#d32f2f"` |
 | `colour_urgent_low`, `colour_low`, `colour_in_range`, `colour_high`, `colour_urgent_high` | none | Colours for `custom_five` |
