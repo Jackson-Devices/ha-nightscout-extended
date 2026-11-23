@@ -34,10 +34,19 @@
   "options": {
     "step": {
       "init": {
+        "description": "Leave a threshold blank to use the corresponding Nightscout setting. Overrides apply to Home Assistant only and use the alarm enable settings from Nightscout.",
         "data": {
-          "scan_interval": "Update interval"
+          "scan_interval": "Update interval",
+          "alarm_urgent_low_mgdl": "Urgent low threshold (mg/dL)",
+          "alarm_low_mgdl": "Low threshold (mg/dL)",
+          "alarm_high_mgdl": "High threshold (mg/dL)",
+          "alarm_urgent_high_mgdl": "Urgent high threshold (mg/dL)"
         }
       }
+    },
+    "error": {
+      "invalid_alarm_threshold": "Enter a positive, finite number or leave this field blank.",
+      "alarm_threshold_order": "The combined Nightscout and Home Assistant thresholds must increase from urgent low to low, high, and urgent high. Change or clear the conflicting overrides."
     }
   },
   "entity": {

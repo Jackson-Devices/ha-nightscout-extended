@@ -4,7 +4,27 @@ import assert from "node:assert/strict";
 
 let CardClass;
 // Just enough DOM for the module to load and render outside a browser.
-globalThis.HTMLElement = class {};
+globalThis.HTMLElement = class {
+  attachShadow() {
+    const nodes = new Map();
+    return {
+      innerHTML: "",
+      querySelector(selector) {
+        const [tag, className] = selector.split(".");
+        const markup = [...this.innerHTML.matchAll(/<([a-z][a-z0-9-]*)([^>]*)>/gi)]
+          .find(([, name, attributes]) => {
+            const classes = attributes.match(/class="([^"]*)"/)?.[1].split(/\s+/) || [];
+            return (!tag || tag === name) && (!className || classes.includes(className));
+          });
+        if (!markup) return null;
+        if (!nodes.has(selector)) {
+          nodes.set(selector, Object.assign(element(), { hidden: /\bhidden\b/.test(markup[2]) }));
+        }
+        return nodes.get(selector);
+      },
+    };
+  }
+};
 globalThis.customElements = {
   get: () => undefined,
   define(_name, constructor) { CardClass = constructor; },
@@ -40,45 +60,47 @@ function sensor(state, unit, attributes = {}) {
   };
 }
 
-function renderCard({
-  glucose, delta, forecast, showChart = false, last = "2026-01-01T11:30:00Z", now = "2026-01-01T12:05:00Z",
-}) {
+const GLUCOSE = "sensor.example_glucose";
+const SOURCE = "2026-01-01T12:00:00Z";
+const NOW = "2026-01-01T12:05:00Z";
+const ALARM_UNTIL = "2026-01-01T12:10:00Z";
+
+function setupCard(config = {}) {
   const card = new CardClass();
   card.setConfig({
-    show_chart: showChart,
+    show_chart: false,
     show_footer: true,
     show_clock: false,
     night_mode: false,
     stale_minutes: 15,
+    ...config,
   });
-  const names = ["card", "wrap", "chart", "clock", "name", "age", "value", "arrow",
-    "delta", "bar", "fill", "footer", "missing"];
-  const el = Object.fromEntries(names.map((name) => [name, element()]));
-  card._root = {};
-  card._el = el;
-  card._ids = {
-    glucose: "sensor.glucose",
-    delta: delta ? "sensor.delta" : undefined,
-    forecast: forecast ? "sensor.forecast" : undefined,
-    last: "sensor.last",
-  };
-  card._hass = {
-    states: {
-      "sensor.glucose": glucose,
-      "sensor.last": { state: last, attributes: {} },
-      ...(delta ? { "sensor.delta": delta } : {}),
-      ...(forecast ? { "sensor.forecast": forecast } : {}),
-    },
-  };
+  return card;
+}
 
+function hassState({ glucose, delta, forecast, last = "2026-01-01T11:30:00Z", callWS }) {
+  return {
+    states: {
+      ...(glucose ? { [GLUCOSE]: glucose } : {}),
+      "sensor.example_last_reading": { state: last, attributes: {} },
+      ...(delta ? { "sensor.example_glucose_change": delta } : {}),
+      ...(forecast ? { "sensor.example_forecast_in_30_minutes": forecast } : {}),
+    },
+    callWS,
+  };
+}
+
+function renderCard({ showChart = false, now = NOW, config, ...states }) {
+  const card = setupCard({ entity: GLUCOSE, show_chart: showChart, ...config });
+  card._build();
   const realNow = Date.now;
-  Date.now = () => new Date(now).getTime();
+  Date.now = () => Date.parse(now);
   try {
-    card._render();
+    card.hass = hassState(states);
   } finally {
     Date.now = realNow;
   }
-  return el;
+  return card._el;
 }
 
 function glucose(state, unit, nativeMgdl, sourceTime = "2026-01-01T12:00:00Z") {
@@ -119,53 +141,194 @@ test("rendered threshold band follows canonical mg/dL in both display units", ()
   }
 });
 
-test("current reading uses Nightscout display limits on canonical mg/dL in both units", () => {
-  // Nightscout 15.0.6, lib/client/index.js#updateCurrentSGV: LOW for [39, 40), HIGH above 400.
+test("current value stays numeric across Nightscout display limits in both units", () => {
   const cases = [
-    { native: 38.999, mgdl: "39", mmol: "2.2", expected: ["39", "2.2"] },
-    { native: 39, mgdl: "39", mmol: "2.2", expected: ["LOW", "LOW"] },
-    { native: 39.999, mgdl: "40", mmol: "2.2", expected: ["LOW", "LOW"] },
-    { native: 40, mgdl: "40", mmol: "2.2", expected: ["40", "2.2"] },
-    { native: 400, mgdl: "400", mmol: "22.2", expected: ["400", "22.2"] },
-    { native: 400.001, mgdl: "400", mmol: "22.2", expected: ["HIGH", "HIGH"] },
-    { native: 401, mgdl: "401", mmol: "22.3", expected: ["HIGH", "HIGH"] },
+    { native: 39, mgdl: "39", mmol: "2.2" },
+    { native: 40, mgdl: "40", mmol: "2.2" },
+    { native: 400, mgdl: "400", mmol: "22.2" },
+    { native: 401, mgdl: "401", mmol: "22.3" },
   ];
-  const actual = cases.map(({ native, mgdl, mmol }) => [
-    renderCard({ glucose: glucose(mgdl, "mg/dL", native) }).value.textContent,
-    renderCard({ glucose: glucose(mmol, "mmol/L", native) }).value.textContent,
-  ]);
-  assert.deepEqual(actual, cases.map(({ expected }) => expected));
+  for (const { native, mgdl, mmol } of cases) {
+    const mg = renderCard({ glucose: glucose(mgdl, "mg/dL", native) });
+    const m = renderCard({ glucose: glucose(mmol, "mmol/L", native) });
+    assert.equal(mg.value.textContent, mgdl);
+    assert.equal(m.value.textContent, mmol);
+    assert.ok(mg.wrap.attributes["aria-label"].startsWith(`Glucose ${mgdl} mg/dL,`));
+    assert.ok(m.wrap.attributes["aria-label"].startsWith(`Glucose ${mmol} mmol/L,`));
+  }
 });
 
-test("current reading uses the same limits for older entities without canonical mg/dL", () => {
-  const cases = [
-    [39, "LOW", "LOW"],
-    [40, "40", "2.2"],
-    [400, "400", "22.2"],
-    [401, "HIGH", "HIGH"],
-  ];
-  const last = "2026-01-01T12:00:00Z";
-  const actual = cases.map(([mgdl]) => [
-    renderCard({ glucose: sensor(mgdl, "mg/dL"), last }).value.textContent,
-    renderCard({ glucose: sensor(mgdl / 18.016, "mmol/L"), last }).value.textContent,
-  ]);
-  assert.deepEqual(actual, cases.map(([, mgdl, mmol]) => [mgdl, mmol]));
+test("native mmol/L display rounds using Nightscout, including change and forecast", () => {
+  // 181.058 mg/dL falls between the Nightscout and HA 10.05 mmol/L boundaries.
+  const el = renderCard({
+    glucose: glucose("10.04984458", "mmol/L", 181.058),
+    delta: sensor("181.058", "mg/dL", { native_mgdl: 181.058 }),
+    forecast: sensor("181.058", "mg/dL", { native_mgdl: 181.058 }),
+  });
+  assert.equal(el.value.textContent, "10.1");
+  assert.equal(el.delta.textContent, "+10.1");
+  assert.ok(footerText(el).includes("30 min ≈ 10.1"));
 });
 
-test("display limits leave the chart's numeric reading and original timestamp intact", (t) => {
-  const drawChart = t.mock.method(CardClass.prototype, "_drawChart");
-  const sourceTime = "2026-01-01T12:01:00Z";
-  const low = renderCard({ glucose: glucose("39", "mg/dL", 39, sourceTime), showChart: true });
-  const high = renderCard({ glucose: glucose("22.3", "mmol/L", 401, sourceTime), showChart: true });
-  assert.deepEqual(drawChart.mock.calls.map(({ arguments: [, , current] }) => current), [
-    [Date.parse(sourceTime), 39],
-    [Date.parse(sourceTime), 401],
+test("older glucose entities keep numeric values in their selected unit", () => {
+  for (const [mgdl, mmol] of [[39, "2.2"], [40, "2.2"], [400, "22.2"], [401, "22.3"]]) {
+    const mg = renderCard({ glucose: sensor(mgdl, "mg/dL"), last: SOURCE });
+    const m = renderCard({ glucose: sensor(mgdl / 18.016, "mmol/L"), last: SOURCE });
+    assert.equal(mg.value.textContent, String(mgdl));
+    assert.equal(m.value.textContent, mmol);
+  }
+});
+
+function chartPath(chart) {
+  const [, path] = chart.innerHTML.match(/<path d="([^"]*)"/);
+  return [...path.matchAll(/[ML]([\d.-]+),([\d.-]+)/g)].map(([, x, y]) => [+x, +y]);
+}
+
+test("Recorder history and native current readings remain distinguishable in the SVG", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse(NOW));
+  const card = setupCard({ show_chart: true });
+  card._build();
+  const history = [38, 39, 300, 400].map((value, index) => ({
+    lu: Date.parse(SOURCE) / 1000 - (4 - index) * 60,
+    s: String(value / 18.016),
+  }));
+  const queries = [];
+  card.hass = hassState({
+    glucose: glucose("22.3", "mmol/L", 401),
+    callWS: async (query) => {
+      queries.push(query);
+      return { [GLUCOSE]: history };
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(queries.map((query) => query.entity_ids), [[GLUCOSE]]);
+  const points = chartPath(card._el.chart);
+  assert.deepEqual(points, [
+    [814.3, 400],
+    [819, 398.9],
+    [823.8, 111.3],
+    [828.6, 1.1],
+    [833.3, 0],
   ]);
-  assert.match(low.chart.innerHTML, /<path d="M[\d.]+,400\.0"/);
-  assert.match(high.chart.innerHTML, /<path d="M[\d.]+,0\.0"/);
-  assert.deepEqual([low.value.textContent, high.value.textContent], ["LOW", "HIGH"]);
-  assert.match(low.wrap.attributes["aria-label"], /^Glucose LOW,/);
-  assert.match(high.wrap.attributes["aria-label"], /^Glucose HIGH,/);
+  assert.equal(card._el.value.textContent, "22.3");
+  card.hass = hassState({ glucose: glucose("22.5", "mmol/L", 405, "2026-01-01T12:01:00Z") });
+  const updated = chartPath(card._el.chart);
+  assert.deepEqual(updated.at(-1), [838.1, 0]);
+  assert.ok(updated.at(-2)[1] > updated.at(-1)[1]);
+});
+
+test("normal chart values retain the default scale; target and visible forecast can expand it", () => {
+  const normal = renderCard({ glucose: glucose("250", "mg/dL", 250), showChart: true });
+  assert.deepEqual(chartPath(normal.chart), [[833.3, 76.9]]);
+
+  const el = renderCard({
+    glucose: sensor(300, "mg/dL", {
+      native_mgdl: 300,
+      source_time: SOURCE,
+      thresholds_mgdl: { ...T, high: 320 },
+    }),
+    forecast: sensor(401, "mg/dL", {
+      forecast: [{ time: "2026-01-01T12:30:00Z", mgdl: 401 }],
+    }),
+    showChart: true,
+  });
+  assert.deepEqual(chartPath(el.chart), [[833.3, 111.9]]);
+  assert.match(el.chart.innerHTML, /<path d="M833\.3,111\.9L976\.2,0\.0"/);
+
+  const targetOnly = renderCard({
+    glucose: sensor(300, "mg/dL", {
+      native_mgdl: 300,
+      source_time: SOURCE,
+      thresholds_mgdl: { ...T, high: 320 },
+    }),
+    showChart: true,
+  });
+  assert.deepEqual(chartPath(targetOnly.chart), [[833.3, 28.6]]);
+});
+
+function withAlarm(value, unit, mgdl, alarm, until = ALARM_UNTIL) {
+  const state = glucose(value, unit, mgdl);
+  state.attributes.simple_alarm = alarm;
+  state.attributes.simple_alarm_until = until;
+  return state;
+}
+
+test("configured card uses entity alarm state, independently of range colour and display unit", (t) => {
+  let now = Date.parse(NOW);
+  t.mock.method(Date, "now", () => now);
+  let timeout;
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    timeout = { callback, delay };
+    return timeout;
+  });
+  t.mock.method(globalThis, "clearTimeout", (scheduled) => {
+    if (scheduled === timeout) timeout = undefined;
+  });
+  t.mock.method(globalThis, "setInterval", () => 0);
+  globalThis.addEventListener = () => {};
+  globalThis.removeEventListener = () => {};
+  globalThis.requestAnimationFrame = (callback) => callback();
+
+  const card = setupCard();
+  card.isConnected = true;
+  card.connectedCallback();
+  t.after(() => {
+    card.disconnectedCallback();
+    delete globalThis.addEventListener;
+    delete globalThis.removeEventListener;
+    delete globalThis.requestAnimationFrame;
+  });
+  for (const [value, unit, mgdl, alarm, label, background] of [
+    [250, "mg/dL", 250, "high", "High alarm", "#f2df74"], // Nightscout threshold 180.
+    [250, "mg/dL", 250, "none", "", "#f2df74"], // Home Assistant threshold 300.
+    ["17.2", "mmol/L", 310, "high", "High alarm", "#ef7a78"],
+    [40, "mg/dL", 40, "urgent_low", "Urgent low alarm", "#c62828"],
+    ["3.3", "mmol/L", 60, "low", "Low alarm", "#e8615a"],
+    [401, "mg/dL", 401, "urgent_high", "Urgent high alarm", "#ef7a78"],
+  ]) {
+    card.hass = hassState({ glucose: withAlarm(value, unit, mgdl, alarm) });
+    const { value: reading, wrap, alarm: badge } = card._el;
+    assert.equal(reading.textContent, String(value));
+    assert.equal(wrap.style["--ngc-bg"], background);
+    assert.ok(badge, "the built card includes an alarm badge");
+    assert.equal(badge.textContent, label);
+    assert.equal(badge.hidden, !label);
+    if (label) assert.ok(wrap.attributes["aria-label"].includes(label));
+    else assert.doesNotMatch(wrap.attributes["aria-label"], /alarm/i);
+  }
+
+  assert.equal(timeout.delay, 5 * 60 * 1000);
+  now += timeout.delay;
+  const expire = timeout.callback;
+  timeout = undefined;
+  expire();
+  assert.equal(card._el.alarm.hidden, true);
+  assert.equal(card._el.alarm.textContent, "");
+  assert.equal(card._el.value.textContent, "401");
+  assert.doesNotMatch(card._el.wrap.attributes["aria-label"], /alarm/i);
+});
+
+test("missing, disabled, unknown, stale or unavailable readings have no active alarm", () => {
+  const cases = [
+    {},
+    { glucose: glucose(401, "mg/dL", 401) },
+    { glucose: withAlarm(401, "mg/dL", 401, "none") },
+    { glucose: withAlarm(401, "mg/dL", 401, "unknown") },
+    { glucose: withAlarm(401, "mg/dL", 401, "constructor") },
+    { glucose: withAlarm(401, "mg/dL", 401, "urgent_high", null) },
+    { glucose: withAlarm(401, "mg/dL", 401, "urgent_high", "not-a-timestamp") },
+    { glucose: withAlarm(401, "mg/dL", 401, "urgent_high", NOW) },
+    { glucose: withAlarm(401, "mg/dL", 401, "urgent_high"), config: { stale_minutes: 2 } },
+    { glucose: withAlarm("unknown", "mg/dL", 401, "urgent_high") },
+    { glucose: withAlarm("unavailable", "mg/dL", 401, "urgent_high") },
+  ];
+  for (const states of cases) {
+    const { alarm, wrap } = renderCard(states);
+    assert.ok(alarm, "the built card includes an alarm badge");
+    assert.equal(alarm.hidden, true);
+    assert.equal(alarm.textContent, "");
+    assert.doesNotMatch(wrap.attributes["aria-label"] || "", /alarm/i);
+  }
 });
 
 test("old, missing or non-numeric readings are stale", () => {

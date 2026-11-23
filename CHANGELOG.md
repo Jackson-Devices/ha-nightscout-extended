@@ -5,12 +5,17 @@ Add a section here before tagging a release.
 
 ## [0.3.3] - 2026-11-22
 
+### Added
+- **Glucose card** shows active low and high threshold alarms in a separate, accessible badge. Home Assistant
+  uses the site's settings by default and provides individually clearable mg/dL threshold overrides in
+  **Configure**. The integration sends no notifications and makes no changes to Nightscout.
+
 ### Fixed
 - **Glucose card**: exact Nightscout thresholds show the correct colour in mg/dL and mmol/L, including for
   older glucose entities without canonical values. Change and forecast now follow the card's glucose unit
   even when their Home Assistant entities use a different unit.
-- **Glucose card** displays Nightscout's `LOW` label from 39 mg/dL to below 40 mg/dL and `HIGH` above 400 mg/dL,
-  in either display unit. The chart still uses the original numeric reading.
+- **Glucose card** keeps readings such as 39 and 401 mg/dL numeric in either display unit and uses Nightscout's
+  mmol/L rounding for native values. The chart expands vertically when needed so extreme readings remain distinct.
 - Glucose, change and forecast sensors expose `native_mgdl` for the unrounded mg/dL value. The glucose
   sensor also includes `source_time`, pairing the reading with its original timestamp.
 

@@ -4,13 +4,15 @@
  * use it as `type: custom:nightscout-glucose-card`.
  *
  * It finds the integration's sensors on its own (or from `entity`), colours the
- * screen by the site's Nightscout alarm thresholds, dims to coloured-on-black
+ * screen by the site's Nightscout glucose ranges, dims to coloured-on-black
  * at night, and draws recent readings plus the AR2 forecast behind the number.
+ * The glucose sensor supplies a separate local threshold alarm indication.
  */
 
 export const CARD_VERSION = "0.3.3";
 const PLATFORM = "nightscout_extended";
-const MGDL_PER_MMOL = 18.016;
+const MGDL_PER_MMOL = 18.016; // Home Assistant conversion for decoded entity states and history.
+const NIGHTSCOUT_MGDL_PER_MMOL = 18.01559; // Nightscout display conversion for native values.
 const DEFAULT_THRESHOLDS = { urgent_low: 55, low: 80, high: 180, urgent_high: 260 };
 
 // Sensor translation keys, matched within the same Nightscout device.
@@ -41,6 +43,13 @@ const NIGHT_FG = {
   stale: "#8a8a8a", urgent_low: "#ff5a50", low: "#ff8a7a",
   in_range: "#f3e7a6", high: "#ffd84d", urgent_high: "#ff8a7a",
 };
+
+const ALARM_LABELS = new Map([
+  ["urgent_low", "Urgent low alarm"],
+  ["low", "Low alarm"],
+  ["high", "High alarm"],
+  ["urgent_high", "Urgent high alarm"],
+]);
 
 const DEFAULT_CONFIG = {
   hours_to_show: 3,
@@ -121,8 +130,17 @@ function canonicalMgdl(state) {
 }
 
 function displayGlucose(state, mmol) {
-  const mgdl = canonicalMgdl(state);
-  return Number.isFinite(mgdl) ? mgdl / (mmol ? MGDL_PER_MMOL : 1) : NaN;
+  const value = num(state);
+  if (!Number.isFinite(value)) return NaN;
+  const native = state.attributes?.native_mgdl;
+  if (Number.isFinite(native)) return mmol ? native / NIGHTSCOUT_MGDL_PER_MMOL : native;
+
+  if (isMmol(state) === mmol) return value;
+  return mmol ? value / MGDL_PER_MMOL : value * MGDL_PER_MMOL;
+}
+
+function formatGlucose(value, mmol) {
+  return mmol ? (Math.round(value * 10) / 10).toFixed(1) : String(Math.round(value));
 }
 
 function glucoseTimeMs(glucose, last) {
@@ -210,6 +228,7 @@ class NightscoutGlucoseCard extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    clearTimeout(this._alarmTimer);
     window.removeEventListener("resize", this._onResize);
   }
 
@@ -310,7 +329,7 @@ class NightscoutGlucoseCard extends HTMLElement {
           /* An explicit width keeps aspect-ratio from deriving the width from a stretched
              height (e.g. in a horizontal stack in portrait), which pushed it off the side. */
           width: 100%; height: 100%; min-height: 200px; aspect-ratio: 16 / 10;
-          display: grid; grid-template-rows: auto 1fr auto auto;
+          display: grid; grid-template-rows: auto 1fr auto auto auto;
           padding: 3cqh 3cqw 2cqh;
           background: var(--ngc-bg); color: var(--ngc-fg);
           font-family: var(--ngc-font, var(--ha-font-family-body, Roboto, system-ui, sans-serif));
@@ -318,7 +337,7 @@ class NightscoutGlucoseCard extends HTMLElement {
         }
         svg.chart { position: absolute; left: 0; right: 0; top: 12%; bottom: 14%; width: 100%; height: 74%;
           pointer-events: none; }
-        .top, .mid, .bar, .footer { position: relative; z-index: 1; }
+        .top, .mid, .alarm, .bar, .footer { position: relative; z-index: 1; }
         .top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
           font-size: calc(max(12px, min(5cqh, 3.2cqw)) * var(--ngc-text-scale, 1)); }
         .clock, .age { opacity: 0.85; }
@@ -331,6 +350,9 @@ class NightscoutGlucoseCard extends HTMLElement {
         .side { display: flex; flex-direction: column; align-items: flex-start; line-height: 1; }
         .arrow { font-size: min(22cqh, 14cqw); }
         .delta { font-size: min(14cqh, 9cqw); }
+        .alarm { justify-self: center; padding: 0.18em 0.7em; border: 1px solid currentColor;
+          border-radius: 999px; font-weight: 600;
+          font-size: calc(max(12px, min(5cqh, 3.2cqw)) * var(--ngc-text-scale, 1)); }
         .bar { justify-self: center; width: 70%; height: min(2.4cqh, 14px); margin: 1cqh 0 1.6cqh;
           border-radius: 999px; background: color-mix(in srgb, var(--ngc-fg) 25%, transparent); }
         .fill { height: 100%; border-radius: inherit; background: var(--ngc-fg); transition: width 0.6s ease; }
@@ -344,6 +366,7 @@ class NightscoutGlucoseCard extends HTMLElement {
           <svg class="chart" viewBox="0 0 1000 400" preserveAspectRatio="none" aria-hidden="true"></svg>
           <div class="top"><span class="clock"></span><span class="name"></span><span class="age"></span></div>
           <div class="mid"><span class="value"></span><div class="side"><span class="arrow"></span><span class="delta"></span></div></div>
+          <div class="alarm" hidden></div>
           <div class="bar"><div class="fill"></div></div>
           <div class="footer"></div>
         </div>
@@ -353,7 +376,7 @@ class NightscoutGlucoseCard extends HTMLElement {
     this._el = {
       card: $("ha-card"), wrap: $(".wrap"), chart: $("svg.chart"), clock: $(".clock"), name: $(".name"),
       age: $(".age"), value: $(".value"), arrow: $(".arrow"), delta: $(".delta"), bar: $(".bar"),
-      fill: $(".fill"), footer: $(".footer"), missing: $(".missing"),
+      fill: $(".fill"), footer: $(".footer"), alarm: $(".alarm"), missing: $(".missing"),
     };
   }
 
@@ -364,14 +387,20 @@ class NightscoutGlucoseCard extends HTMLElement {
     const g = this._state("glucose");
     el.wrap.hidden = !g;
     el.missing.hidden = !!g;
-    if (!g || !this._hass) return;
+    clearTimeout(this._alarmTimer);
+    if (!g || !this._hass) {
+      el.alarm.hidden = true;
+      el.alarm.textContent = "";
+      return;
+    }
 
     const mmol = isMmol(g);
     const value = num(g);
     const mgdl = canonicalMgdl(g);
     const last = this._state("last");
     const lastMs = glucoseTimeMs(g, last);
-    const ageMin = (Date.now() - lastMs) / 60000;
+    const now = Date.now();
+    const ageMin = (now - lastMs) / 60000;
     const t = logic.thresholds(g.attributes && g.attributes.thresholds_mgdl);
     // Compare in the stored unit to avoid a floating-point round trip.
     const mmolFallback = mmol && Number.isFinite(mgdl) && !Number.isFinite(g.attributes?.native_mgdl);
@@ -393,15 +422,16 @@ class NightscoutGlucoseCard extends HTMLElement {
     el.name.textContent = cfg.name || "";
     el.age.textContent = logic.formatAge(ageMin);
 
-    // Nightscout's current-reading labels are independent of the site's alarm thresholds.
-    let displayLimit;
-    if (comparisonValue >= 39 / comparisonDivisor && comparisonValue < 40 / comparisonDivisor) {
-      displayLimit = "LOW";
-    } else if (comparisonValue > 400 / comparisonDivisor) {
-      displayLimit = "HIGH";
+    const displayed = displayGlucose(g, mmol);
+    el.value.textContent = Number.isFinite(displayed) ? formatGlucose(displayed, mmol) : "---";
+
+    const alarmUntil = Date.parse(g.attributes?.simple_alarm_until);
+    const alarm = !stale && alarmUntil > now ? ALARM_LABELS.get(g.attributes?.simple_alarm) : undefined;
+    el.alarm.hidden = !alarm;
+    el.alarm.textContent = alarm || "";
+    if (alarm && this.isConnected) {
+      this._alarmTimer = setTimeout(() => this._render(), Math.min(alarmUntil - now, 2147483647));
     }
-    el.value.textContent = displayLimit
-      ?? (Number.isFinite(value) ? (mmol ? value.toFixed(1) : String(Math.round(value))) : "---");
     const trend = this._state("trend");
     el.arrow.textContent = stale ? "" : ARROWS[trend ? trend.state : ""] || "";
     el.delta.textContent = stale ? "" : logic.formatDelta(displayGlucose(this._state("delta"), mmol), mmol);
@@ -417,15 +447,16 @@ class NightscoutGlucoseCard extends HTMLElement {
       const fc = displayGlucose(this._state("forecast"), mmol);
       if (Number.isFinite(iob)) parts.push(`IOB ${iob.toFixed(2)} U`);
       if (Number.isFinite(cob)) parts.push(`COB ${Math.round(cob)} g`);
-      if (Number.isFinite(fc) && !stale) parts.push(`30 min ≈ ${mmol ? fc.toFixed(1) : Math.round(fc)}`);
+      if (Number.isFinite(fc) && !stale) parts.push(`30 min ≈ ${formatGlucose(fc, mmol)}`);
       el.footer.replaceChildren(...parts.map((p) => Object.assign(document.createElement("span"), { textContent: p })));
     }
 
-    const readingLabel = displayLimit ?? `${el.value.textContent} ${mmol ? "mmol/L" : "mg/dL"}`;
+    const readingLabel = `${el.value.textContent} ${mmol ? "mmol/L" : "mg/dL"}`;
+    const alarmLabel = alarm ? `, ${alarm}` : "";
     el.wrap.setAttribute(
       "aria-label",
       stale ? `No recent glucose reading (${el.age.textContent})`
-        : `Glucose ${readingLabel}, ${el.delta.textContent}, ${el.age.textContent}`
+        : `Glucose ${readingLabel}, ${el.delta.textContent}, ${el.age.textContent}${alarmLabel}`
     );
 
     el.chart.style.display = cfg.show_chart ? "" : "none";
@@ -453,19 +484,32 @@ class NightscoutGlucoseCard extends HTMLElement {
     const t0 = now - this._config.hours_to_show * 3600000;
     const t1 = now + FORECAST_AHEAD_MIN * 60000;
     const X = (ms) => (((ms - t0) / (t1 - t0)) * 1000).toFixed(1);
-    const Y = (v) => ((1 - (Math.min(CHART_HI, Math.max(CHART_LO, v)) - CHART_LO) / (CHART_HI - CHART_LO)) * 400).toFixed(1);
     const pts = this._history.pts.filter((p) => p[0] >= t0);
     if (current && Number.isFinite(current[0]) && Number.isFinite(current[1])
         && (!pts.length || current[0] > pts[pts.length - 1][0])) pts.push(current);
-    const line = pts.map((p, i) => `${i ? "L" : "M"}${X(p[0])},${Y(p[1])}`).join("");
+
+    const fc = this._state("forecast")?.attributes?.forecast;
+    const forecast = current && pts.length && Array.isArray(fc)
+      ? fc.map((p) => [new Date(p.time).getTime(), Number(p.mgdl)])
+        .filter(([time, mgdl]) => Number.isFinite(time) && Number.isFinite(mgdl))
+      : [];
+
+    // Keep the default chart scale whenever the visible data and target fit.
+    let lo = Math.min(CHART_LO, t.low, t.high);
+    let hi = Math.max(CHART_HI, t.low, t.high);
+    for (const [time, mgdl] of pts.concat(forecast)) {
+      if (time < t0 || time > t1 || !Number.isFinite(mgdl)) continue;
+      lo = Math.min(lo, mgdl);
+      hi = Math.max(hi, mgdl);
+    }
+    const Y = (v) => ((1 - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo)) * 400).toFixed(1);
+    const line = pts.map(([time, mgdl], i) => `${i ? "L" : "M"}${X(time)},${Y(mgdl)}`).join("");
 
     let fline = "";
-    const f = this._state("forecast");
-    const fc = (f && f.attributes && f.attributes.forecast) || [];
-    if (current && pts.length && fc.length) {
+    if (forecast.length) {
       const lastPt = pts[pts.length - 1];
       fline = `M${X(lastPt[0])},${Y(lastPt[1])}` +
-        fc.map((p) => `L${X(new Date(p.time).getTime())},${Y(Number(p.mgdl))}`).join("");
+        forecast.map(([time, mgdl]) => `L${X(time)},${Y(mgdl)}`).join("");
     }
     const dash = 'vector-effect="non-scaling-stroke"';
     this._el.chart.innerHTML = `

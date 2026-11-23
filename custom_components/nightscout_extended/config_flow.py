@@ -23,14 +23,20 @@ from homeassistant.helpers.selector import (
 
 from .api import NightscoutAuthError, NightscoutClient, NightscoutConnectionError
 from .const import (
+    ALARM_THRESHOLD_OPTIONS,
     CONF_SCAN_INTERVAL,
     CONF_USE_API_SECRET,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MIN_SCAN_INTERVAL,
+    UNIT_MGDL,
 )
+from .coordinator import finite_threshold_mgdl, thresholds_ordered
 
 PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+ALARM_THRESHOLD = NumberSelector(
+    NumberSelectorConfig(mode=NumberSelectorMode.BOX, step="any", unit_of_measurement=UNIT_MGDL)
+)
 
 
 def _normalize_url(url: str) -> str:
@@ -115,24 +121,47 @@ class NightscoutExtendedConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class NightscoutExtendedOptionsFlow(OptionsFlow):
-    """How often to poll."""
+    """Set the update interval and optional HA threshold overrides."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        current_options = self.config_entry.options
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(data={CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL])})
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_SCAN_INTERVAL,
-                        default=self.config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=MIN_SCAN_INTERVAL, max=900, step=10,
-                            unit_of_measurement="s", mode=NumberSelectorMode.BOX,
-                        )
-                    )
-                }
-            ),
-        )
+            options = dict(current_options)
+            options[CONF_SCAN_INTERVAL] = int(user_input[CONF_SCAN_INTERVAL])
+            overrides = {}
+            for key, option in ALARM_THRESHOLD_OPTIONS.items():
+                options.pop(option, None)
+                if option not in user_input:
+                    continue
+                value = finite_threshold_mgdl(user_input[option])
+                if value is None or value <= 0:
+                    errors[option] = "invalid_alarm_threshold"
+                    continue
+                overrides[key] = options[option] = value
+
+            coordinator = getattr(self.config_entry, "runtime_data", None)
+            site_thresholds = coordinator.site_alarm_thresholds_mgdl if coordinator else {}
+            if overrides and not thresholds_ordered(site_thresholds | overrides):
+                errors["base"] = "alarm_threshold_order"
+            if not errors:
+                return self.async_create_entry(data=options)
+
+        values = current_options if user_input is None else user_input
+        fields = {
+            vol.Required(
+                CONF_SCAN_INTERVAL,
+                default=values.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=MIN_SCAN_INTERVAL, max=900, step=10,
+                    unit_of_measurement="s", mode=NumberSelectorMode.BOX,
+                )
+            )
+        }
+        for option in ALARM_THRESHOLD_OPTIONS.values():
+            value = finite_threshold_mgdl(values.get(option))
+            description = {"suggested_value": value} if value is not None else None
+            fields[vol.Optional(option, description=description)] = ALARM_THRESHOLD
+
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
