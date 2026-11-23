@@ -307,7 +307,8 @@ def seeded_collections(stock, documents: dict[str, list[dict]], alternate_entrie
     all_entries = documents["entries"] + alternate_entries
     try:
         with stopped_stock():
-            _mongo(stock, f'assert.eq({namespace}, 0); assert.eq(db.getCollectionInfos({{name: "entries"}}).length, 1);')
+            _mongo(stock, f'assert.eq({namespace}, 0); '
+                          'assert.eq(db.getCollectionInfos({name: "entries"}).length, 1);')
             reserved = True
             _mongo(stock, f'assert.commandWorked(db.entries.renameCollection("{backup}", false));')
             for collection, rows in documents.items():

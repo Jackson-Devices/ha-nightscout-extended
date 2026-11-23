@@ -50,7 +50,8 @@ def _meaning(legacy: dict | None, current: dict | None) -> str:
     legacy_outcome = legacy["outcome"] if legacy else None
     current_outcome = current["outcome"] if current else None
     if current_outcome == "failed":
-        return "**current differs: blocks merge**" + (" (regression: legacy matched)" if legacy_outcome == "passed" else "")
+        regression = " (regression: legacy matched)" if legacy_outcome == "passed" else ""
+        return "**current differs: blocks merge**" + regression
     if current_outcome == "skipped":
         return "not applicable to current"
     if legacy_outcome == "failed":

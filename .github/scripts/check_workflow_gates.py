@@ -16,7 +16,10 @@ SUCCESS = "needs.preflight.result == 'success'"
 OPT_IN = "vars.CODEQL_ADVANCED_ENABLED == 'true'"
 READ = {"contents": "read"}
 SECURITY_WRITE = {**READ, "security-events": "write"}
-KNOWN_VALIDATE_JOBS = {"preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha", "codeql"}
+KNOWN_VALIDATE_JOBS = {
+    "preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha",
+    "lint", "dependency-review", "pr-policy", "codeql-enabled", "codeql",
+}
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -86,6 +89,8 @@ def check_lint_job(job, error, has_parity):
         "-r .github/scripts/requirements-preflight.txt",
         "python .github/scripts/check_workflow_gates.py",
         "python .github/scripts/test_workflow_gates.py",
+        "python .github/scripts/check_exception_register.py",
+        "python .github/scripts/test_policy_checks.py",
     ]
     if has_parity:
         commands.extend([
@@ -126,7 +131,8 @@ def check_entry_jobs(name, jobs, has_parity, error):
             error(f"{job_id} has an unapproved reusable workflow target")
         if "with" in job or "secrets" in job:
             error(f"{job_id} must not take caller inputs or secrets")
-        expected_permissions = SECURITY_WRITE if is_scan else {"contents": "write"} if (name, job_id) == ("release.yml", "release") else None
+        is_release = (name, job_id) == ("release.yml", "release")
+        expected_permissions = SECURITY_WRITE if is_scan else {"contents": "write"} if is_release else None
         if job.get("permissions") != expected_permissions:
             error(f"{job_id} changes its approved permissions")
 

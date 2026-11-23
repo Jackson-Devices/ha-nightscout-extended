@@ -221,7 +221,9 @@ def _child(directory, root, mode, subject, anchor, expected, calendar_range, his
         )
         result = json.loads(completed.stdout)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        raise AssertionError(f"{mode} candidate subprocess did not yield a private report ({type(exc).__name__})") from None
+        raise AssertionError(
+            f"{mode} candidate subprocess did not yield a private report ({type(exc).__name__})"
+        ) from None
     require(isinstance(result, dict) and completed.returncode == 0,
             f"{mode} candidate subprocess exited without a valid observation")
     return result

@@ -81,6 +81,10 @@ class WorkflowGateTests(unittest.TestCase):
             {"if": document["jobs"]["parity"]["if"].replace(" }}", " && !github.event.pull_request.draft }}")}))
         self.assert_rejected("parity has an unapproved gate condition")
 
+    def test_codeql_enabled_check_cannot_be_removed(self):
+        self.change("validate.yml", lambda document: document["jobs"].pop("codeql-enabled"))
+        self.assert_rejected("required jobs missing: codeql-enabled")
+
     def test_duplicate_yaml_keys_are_rejected(self):
         path = self.workflows / "release.yml"
         with path.open("a", encoding="utf-8") as target:
