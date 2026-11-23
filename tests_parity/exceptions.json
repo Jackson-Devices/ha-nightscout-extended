@@ -1,6 +1,8 @@
 {
-  "_comment": "Divergences from stock Nightscout that the repository owner has approved in a PR comment (CONTRIBUTING.md, U-8). 'approved' entries relax the default-configuration parity checks; anything not listed there fails them. 'approved_opt_in' entries are allowed only behind a non-default option and never relax a default-configuration check.",
-  "approved": {},
+  "_comment": "Divergences approved by the repository owner (CONTRIBUTING.md, U-8). An approved entry permits only its own documented comparison. Approved opt-in entries never relax a default comparison.",
+  "approved": {
+    "E-1d": "Owner direction in the Codex work order ns-stock-fork-review-20261122/alarm/oracle-dispatch.md: the HA card shows the numeric value at stock LOW/HIGH presentation boundaries and renders the threshold alarm separately."
+  },
   "approved_opt_in": {
     "E-1b": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7086580376",
     "E-1c": "https://github.com/Jackson-Devices/ha-nightscout-extended/pull/1#issuecomment-7086580376"

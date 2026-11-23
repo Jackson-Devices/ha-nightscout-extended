@@ -1,7 +1,7 @@
 // Nightscout's own current-reading display and non-alarming paint from the pinned stock server.
 //
 // Input (stdin JSON): { lib, css?, settings: { units, thresholds, theme }, cases: [mgdl, ...] }
-// Output: [{ mgdl, text, rangeClass, paint?: { background, foreground } }]
+// Output: [{ mgdl, text, numericText, rangeClass, paint?: { background, foreground } }]
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -62,19 +62,20 @@ const make = new Function(
     extract("sgvToColoredRange"),
     extract("adjustCurrentSGVClasses"),
     extract("updateCurrentSGV"),
-    "return updateCurrentSGV;",
+    "return { updateCurrentSGV, scaleBg };",
   ].join("\n"),
 );
-const updateCurrentSGV = make(client, units, currentBG, container, bgStatus, () => false, () => false);
+const { updateCurrentSGV, scaleBg } = make(client, units, currentBG, container, bgStatus, () => false, () => false);
 
 const out = input.cases.map((mgdl) => {
   currentBG.out = "";
   updateCurrentSGV({ mgdl });
   const { rangeClass } = container;
-  if (!idlePaint) return { mgdl, text: currentBG.out, rangeClass };
+  const display = { mgdl, text: currentBG.out, numericText: String(scaleBg(mgdl)), rangeClass };
+  if (!idlePaint) return display;
   const paint = rangeClass
     ? { ...idlePaint, foreground: declaration(`.${rangeClass} .bgButton`, "color") }
     : idlePaint;
-  return { mgdl, text: currentBG.out, rangeClass, paint };
+  return { ...display, paint };
 });
 process.stdout.write(JSON.stringify(out));

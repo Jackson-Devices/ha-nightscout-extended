@@ -7,7 +7,7 @@ A pull request that breaks any of them doesn't merge.
 
 **Behaviour must be 1:1 identical to stock Nightscout.** If the integration shows, computes, accepts or rejects
 something differently from Nightscout at the pinned reference, that is a failure. The only exception is an entry
-in the PR's exception register that the repository owner has approved in a PR comment.
+in the PR's exception register that cites explicit repository-owner approval. Use a PR comment for new exceptions.
 
 Every pull request must keep that parity. "Close enough", "more correct than Nightscout" and "matches the
 Swagger schema" are not the bar. What Nightscout's code *does* is the bar, cited by file and line at the pinned
@@ -35,9 +35,16 @@ candidate separately, so its Python imports cannot accidentally resolve to the l
 For a local run from this legacy checkout, fetch that commit from the fork into `.parity-reference`
 first. The exact revision matters when interpreting failures. [Reference candidate](https://github.com/Jackson-Devices/ha-nightscout-extended/commit/44f4e7c2809ee00d43a9642e875efd8fb2157478)
 
-For example, at 401 mg/dL the stock current-reading display prints `HIGH`. Compare the card text with that
-rendering, retain the numeric SGV and timestamp in the data comparison, and use the alarm plugin's own
-logic for any alarm comparison. The display label cannot establish a sensor limit. [Stock display](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/client/index.js#L518) · [Stock alarms](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/simplealarms.js#L39)
+The `corrected_product` marker selects the display and threshold-alarm checks. Run those from the
+separate pinned PR1 worktree with a copy of `tests_parity` and a clean disposable stock instance for the
+same site profile. The legacy and v3 comparisons use their original checkouts.
+
+At 39 and above 400 mg/dL the stock current-reading display prints `LOW` or `HIGH`. The E-1d check confirms
+both the stock label and HA's numeric reading in the site unit. Intermediate values and paint still have
+their own strict comparisons. The alarm test runs the pinned threshold plugin with the stock unit functions.
+It checks the HA entity and separate card badge, including independently saved overrides, disabled flags,
+expiration and a newer unusable reading. This comparison covers the local threshold indication. Predictive
+alarms, snoozes, delivery, and real device limits are outside the gate. [Stock display](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/client/index.js#L518) · [Stock alarms](https://github.com/nightscout/cgm-remote-monitor/blob/9cd304f78a5c12401c9711cbd56d2a12eaca0632/lib/plugins/simplealarms.js#L39)
 
 ## Universal rules (U-1 to U-14)
 
@@ -50,7 +57,7 @@ logic for any alarm comparison. The display label cannot establish a sensor limi
 | **U-5** | **Mutation evidence** | Reverting the production change, or flipping its key operator or constant, makes at least one test fail. Link the run or commit that shows it. |
 | **U-6** | **No weakened tests** | No deletion, skip, `xfail` or relaxed assertion. Each changed assertion is listed in the PR description with the AC that requires it. |
 | **U-7** | **Fixed scope** | The PR description lists the files it may touch. The diff stays within them. No workflow, Dependabot, CodeQL, `SECURITY.md` or CONTRIBUTING changes in a feature PR. |
-| **U-8** | **Exception register** | Every divergence from Nightscout is listed with evidence and needs the **repo owner's approval in a PR comment**. The register starts empty, and an unapproved entry fails. |
+| **U-8** | **Exception register** | Every divergence from Nightscout is listed with evidence of the **repo owner's approval**. Obtain new approvals in a PR comment. An unapproved entry fails. |
 | **U-9** | **Evidence at head** | Each AC tick links a CI run at the **current head SHA**. "Passes locally" or a run on an earlier SHA doesn't count. Validate must be green with 0 new CodeQL alerts. |
 | **U-10** | **Stable identifiers** | `unique_id`, entity IDs, attribute names and service names are unchanged unless an AC names the change and gives a migration. Stored data, such as glucose history, doesn't change value after the fact without a migration AC. |
 | **U-11** | **No secret leaks** | No credential (token, API secret or its SHA-1) in logs, exceptions, diagnostics or attributes. Every new error path has a test asserting this. |

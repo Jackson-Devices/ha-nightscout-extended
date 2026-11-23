@@ -47,8 +47,20 @@ def _ha_unit(site_units: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def seeded(stock):
-    """Seed readings and treatments once per server, then wait until Nightscout has processed them."""
+def stock_seed_result():
+    """Keep the seed result across tests in this disposable stock profile."""
+    return {}
+
+
+@pytest.fixture
+def seeded(stock, allow_local_stock_server, stock_seed_result):
+    """Initialize stock once, after this test's loopback socket guard is active."""
+    if "result" in stock_seed_result:
+        assert stock_seed_result["result"] is not None, "the prior stock seed attempt failed; restart the disposable site"
+        return stock_seed_result["result"]
+    # A failure after a write may have seeded only part of the data.
+    stock_seed_result["result"] = None
+
     now = datetime.now(timezone.utc).replace(microsecond=0)
     readings = [
         # An entry labelled mmol/L, older than the valid readings so it can't be the current one.
@@ -81,7 +93,9 @@ def seeded(stock):
 
     newest = readings[-1]["date"]
     _wait_for_bgnow(stock, lambda bgnow: bgnow.get("mills") == newest, "report the seeded reading")
-    return {"now": now, "readings": readings}
+    result = {"now": now, "readings": readings}
+    stock_seed_result["result"] = result
+    return result
 
 
 def _wait_for_bgnow(stock, matches, operation):
@@ -145,10 +159,11 @@ def invalid_latest_entry(stock, seeded):
         _wait_for_bgnow(stock, lambda bgnow: bgnow == baseline_bgnow, "restore bgnow after the invalid case")
 
 
-async def _setup(hass: HomeAssistant, stock) -> MockConfigEntry:
+async def _setup(hass: HomeAssistant, stock, *, options=None) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=BASE_URL, title="Parity",
         data={CONF_URL: BASE_URL, CONF_API_KEY: stock.secret, CONF_USE_API_SECRET: True},
+        options=options or {},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id), "integration failed to set up against stock"
@@ -362,6 +377,23 @@ def _css_colour(value):
     return names.get(value, value)
 
 
+def _compare_current_text(mgdl, card, ns, approved):
+    """Keep the stock label and HA numeric requirement as independent assertions."""
+    if mgdl == 39 or mgdl > 400:
+        stock_label = "LOW" if mgdl == 39 else "HIGH"
+        if ns["text"] != stock_label:
+            return {"mgdl": mgdl, "what": "native presentation label", "expected": stock_label, "nightscout": ns["text"]}
+        if "E-1d" not in approved:
+            return {"mgdl": mgdl, "what": "numeric presentation", "needs_owner_approval": "E-1d"}
+        expected = ns["numericText"]
+    else:
+        expected = ns["text"]
+    if card["text"] != expected:
+        return {"mgdl": mgdl, "what": "number", "nightscout": ns["text"], "expected": expected, "card": card["text"]}
+    return None
+
+
+@pytest.mark.corrected_product
 async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seeded, native_lib):
     """Compare text and both rendered colours from 40 to 450 mg/dL in the default daytime card configuration."""
     readings = list(range(40, 451))
@@ -372,8 +404,8 @@ async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seed
     mismatches = []
     for mgdl, card, ns in zip(readings, shown, native, strict=True):
         assert ns["mgdl"] == mgdl, "stock display returned a different case"
-        if card["text"] != ns["text"]:
-            mismatches.append({"mgdl": mgdl, "what": "number", "nightscout": ns["text"], "card": card["text"]})
+        if mismatch := _compare_current_text(mgdl, card, ns, approved):
+            mismatches.append(mismatch)
         expected = {name: _css_colour(colour) for name, colour in ns["paint"].items()}
         actual = {name: _css_colour(colour) for name, colour in card["paint"].items()}
         if actual == expected:
@@ -388,16 +420,102 @@ async def test_card_shows_what_nightscout_shows(hass: HomeAssistant, stock, seed
     assert not mismatches, report(mismatches)
 
 
+@pytest.mark.corrected_product
 async def test_card_display_limits_match_nightscout(hass: HomeAssistant, stock, seeded, native_lib):
     """Compare the presentation boundaries without using range colour or alarm expectations."""
     readings = [39, 40, 400, 401]
     shown = await _render_card_cases(hass, stock, seeded, readings)
     native = _native_display(stock, native_lib, readings)
-    mismatches = [
-        {"mgdl": mgdl, "what": "display limit", "nightscout": ns["text"], "card": card["text"]}
-        for mgdl, card, ns in zip(readings, shown, native, strict=True) if card["text"] != ns["text"]
-    ]
+    approved = approved_exceptions()
+    mismatches = []
+    for mgdl, card, ns in zip(readings, shown, native, strict=True):
+        assert ns["mgdl"] == mgdl, "stock display returned a different case"
+        if mismatch := _compare_current_text(mgdl, card, ns, approved):
+            mismatches.append(mismatch)
     assert not mismatches, report(mismatches)
+
+
+@pytest.mark.corrected_product
+async def test_latest_unusable_stock_row_suppresses_older_alarm(hass: HomeAssistant, stock, seeded, native_lib):
+    """Use the latest numeric 39 in HA even when stock bgnow omits it from last."""
+    query = urlencode({"find[device]": "parity-alarm-latest", "count": 10})
+    collection = "/api/v1/entries.json?" + query
+    older = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=2)
+    now = older + timedelta(minutes=2)
+    sources = [
+        {"type": "sgv", "sgv": mgdl, "date": int(when.timestamp() * 1000), "dateString": _iso(when),
+         "direction": "Flat", "device": "parity-alarm-latest"}
+        for mgdl, when in [(155, older), (39, older + timedelta(minutes=1))]
+    ]
+    assert not stock.get(collection)
+    try:
+        stock.post("/api/v1/entries", [sources[0]])
+        _wait_for_bgnow(stock, lambda bg: bg.get("mills") == sources[0]["date"], "report the alarm sample")
+        entry = await _setup(hass, stock, options={"alarm_high_mgdl": 120})
+        before = hass.states.get("sensor.parity_glucose")
+        assert before is not None and "simple_alarm" in before.attributes, "corrected alarm capability is missing"
+
+        stock.post("/api/v1/entries", [sources[1]])
+        bgnow = _wait_for_bgnow(
+            stock,
+            lambda bg: any(row.get("mills") == sources[1]["date"] for row in bg.get("sgvs", [])),
+            "report the newer low-limit reading",
+        )
+        assert bgnow["last"] == sources[0]["sgv"] and bgnow["mills"] == sources[0]["date"]
+        raw_cases = sorted(bgnow["sgvs"], key=lambda row: row["mills"])
+        assert [row["mgdl"] for row in raw_cases[-2:]] == [155, 39]
+
+        settings = stock.get("/api/v1/status.json")["settings"]
+        settings["thresholds"]["bgTargetTop"] = 120  # Apply the local override to the reference input only.
+        expected = await hass.async_add_executor_job(node, HERE / "js" / "native_alarm.mjs", {
+            "lib": str(native_lib),
+            "cases": [{"settings": settings, "entry": row, "now": int(now.timestamp() * 1000)}
+                      for row in raw_cases[-2:]],
+        })
+        assert expected == ["high", "none"]
+        assert before.attributes["simple_alarm"] == expected[0]
+
+        [native_display] = _native_display(stock, native_lib, [39])
+        assert native_display["text"] == "LOW"
+        latest_time = datetime.fromtimestamp(sources[1]["date"] / 1000, timezone.utc)
+        renders = []
+        for remove_previous in (False, True):
+            if remove_previous:
+                prior_id = next(row["_id"] for row in stock.get(collection) if row["date"] == sources[0]["date"])
+                assert re.fullmatch("[0-9a-fA-F]{24}", prior_id), "stock did not return a MongoDB entry ID"
+                stock.delete(f"/api/v1/entries/{prior_id}")
+                sole = _wait_for_bgnow(
+                    stock,
+                    lambda bg: [row["mills"] for row in bg.get("sgvs", [])] == [sources[1]["date"]],
+                    "report a bucket with just the newest low-limit row",
+                )
+                assert sole.get("last") is None and sole.get("mills") is None
+
+            await entry.runtime_data.async_refresh()
+            await hass.async_block_till_done()
+            after = hass.states.get("sensor.parity_glucose")
+            last = hass.states.get("sensor.parity_last_reading")
+            assert after is not None and last is not None
+            assert after.attributes["native_mgdl"] == 39
+            assert datetime.fromisoformat(after.attributes["source_time"]) == latest_time
+            assert datetime.fromisoformat(last.state) == latest_time
+            assert after.attributes["simple_alarm"] is None
+            assert after.attributes["simple_alarm_until"] is None
+            renders.append({"glucose": after.as_dict(), "last": last.as_dict()})
+
+        cards = await hass.async_add_executor_job(node, HERE / "js" / "card_render.mjs", {
+            "card": str(CARD), "now": now.isoformat(), "cases": renders,
+        })
+        assert len(cards) == len(renders)
+        for card in cards:
+            assert card["text"] == native_display["numericText"]
+            assert card["hasAlarmElement"] and card["alarm"] is None
+    finally:
+        for row in stock.get(collection):
+            entry_id = row["_id"]
+            assert re.fullmatch("[0-9a-fA-F]{24}", entry_id), "stock did not return a MongoDB entry ID"
+            stock.delete(f"/api/v1/entries/{entry_id}")
+        assert not stock.get(collection)
 
 
 async def test_card_change_text_matches_nightscout(hass: HomeAssistant, stock, seeded):

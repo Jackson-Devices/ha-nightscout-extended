@@ -34,6 +34,19 @@ jobs:
           path: .parity-reference
           sparse-checkout: custom_components/nightscout_extended
           persist-credentials: false
+      - name: Check out the alarm product revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: Jackson-Devices/ha-nightscout-extended
+          ref: 941854a09fb399ec8074ea868a885a49c1333b0c
+          path: .parity-alarm-product
+          sparse-checkout: custom_components/nightscout_extended
+          persist-credentials: false
+      - name: Stage the corrected-product tests
+        shell: bash
+        run: |
+          test "$(git -C .parity-alarm-product rev-parse HEAD)" = "941854a09fb399ec8074ea868a885a49c1333b0c"
+          cp -R tests_parity .parity-alarm-product/
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
@@ -52,11 +65,24 @@ jobs:
         id: stock_start
         run: tests_parity/stock.sh start "${{ matrix.site }}"
 
-      - name: Parity tests
+      - name: Legacy and candidate API parity
+        run: >-
+          "$RUNNER_TEMP/parity-venv/bin/python" -m pytest
+          tests_parity --ignore=tests_parity/test_stock_contract.py -m "not corrected_product"
+          -c tests_parity/pytest.ini -p no:cacheprovider --show-capture=no --tb=short -v
+
+      - name: Start a clean site for the corrected product
+        id: corrected_site
+        if: ${{ !cancelled() && steps.stock_start.outcome == 'success' }}
+        run: tests_parity/stock.sh start "${{ matrix.site }}"
+
+      - name: Alarm and card parity
+        if: ${{ !cancelled() && steps.corrected_site.outcome == 'success' }}
+        working-directory: .parity-alarm-product
         run: >-
           "$RUNNER_TEMP/parity-venv/bin/python" -m pytest
           tests_parity --ignore=tests_parity/test_stock_contract.py
-          -c tests_parity/pytest.ini -p no:cacheprovider --show-capture=no --tb=short -v
+          -m corrected_product -c tests_parity/pytest.ini -p no:cacheprovider --show-capture=no --tb=short -v
 
       - name: Stop stock Nightscout
         if: ${{ always() && steps.stock_start.outcome != 'skipped' && steps.stock_start.outcome != '' }}
