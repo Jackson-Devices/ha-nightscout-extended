@@ -6,6 +6,7 @@ Kept free of Home Assistant imports so the parsing can be tested on its own.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,6 +16,8 @@ import aiohttp
 MMOL_PER_MGDL = 1 / 18.0182
 
 PROPERTIES = "bgnow,delta,direction,iob,cob,ar2,basal"
+_TREATMENTS_PATH = "/api/v1/treatments.json"
+_CALENDAR_COUNTS = (1000, 10000)
 
 
 class NightscoutAuthError(Exception):
@@ -43,6 +46,14 @@ class Treatment:
     notes: str | None = None
     entered_by: str | None = None
     duration_min: float | None = None
+
+    def end_time(self, default_length: timedelta) -> datetime:
+        """Use the visible point width for absent or unusable durations."""
+        end = _duration_end(self.time, self.duration_min)
+        if end is not None:
+            return end
+        time_left = datetime.max.replace(tzinfo=self.time.tzinfo) - self.time
+        return self.time + min(default_length, time_left)
 
     @property
     def summary(self) -> str:
@@ -154,6 +165,15 @@ def _parse_time(item: dict[str, Any]) -> datetime | None:
     return _ms_to_dt(item.get("mills") or item.get("date"))
 
 
+def _duration_end(start: datetime, minutes: float | None) -> datetime | None:
+    if minutes is None or not math.isfinite(minutes) or minutes <= 0:
+        return None
+    try:
+        return start + timedelta(minutes=minutes)
+    except OverflowError:
+        return None
+
+
 def parse_treatments(items: Any) -> list[Treatment]:
     """Turn /api/v1/treatments.json into Treatments, oldest first. Unusable entries are skipped."""
     out: list[Treatment] = []
@@ -184,6 +204,11 @@ def parse_treatments(items: Any) -> list[Treatment]:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _calendar_iso(dt: datetime) -> str:
+    """Format an already UTC calendar bound at stock v1's storage precision."""
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class NightscoutClient:
@@ -253,7 +278,7 @@ class NightscoutClient:
 
     async def async_get_treatments(self, start: datetime, end: datetime, limit: int = 1000) -> list[Treatment]:
         items = await self._get(
-            "/api/v1/treatments.json",
+            _TREATMENTS_PATH,
             {
                 "find[created_at][$gte]": _iso(start),
                 "find[created_at][$lte]": _iso(end),
@@ -261,6 +286,83 @@ class NightscoutClient:
             },
         )
         return parse_treatments(items)
+
+    async def _calendar_rows(self, query: dict[str, str], count: int) -> list[dict[str, Any]]:
+        rows = await self._get(_TREATMENTS_PATH, {**query, "count": str(count)})
+        if not isinstance(rows, list) or len(rows) > count or any(not isinstance(row, dict) for row in rows):
+            raise NightscoutConnectionError("Invalid legacy Nightscout calendar response")
+        return rows
+
+    async def _calendar_range(self, query: dict[str, str]) -> list[dict[str, Any]]:
+        # Legacy v1 accepts count but has no offset. Require a short response.
+        for count in _CALENDAR_COUNTS:
+            rows = await self._calendar_rows(query, count)
+            if len(rows) < count:
+                return rows
+        raise NightscoutConnectionError("Incomplete legacy Nightscout calendar range")
+
+    async def _calendar_lookback(self, before: str, default_length: timedelta) -> timedelta:
+        # Stock v1 leaves duration operands as strings. MongoDB's numeric type
+        # selector and descending tuple sort expose the largest numeric durations.
+        query = {
+            "find[created_at][$lt]": before,
+            "find[duration][$type]": "number",
+            "sort[0][0]": "duration",
+            "sort[0][1]": "desc",
+        }
+        minimum = default_length.total_seconds() / 60
+        for count in (1, *_CALENDAR_COUNTS):
+            rows = await self._calendar_rows(query, count)
+            for row in rows:
+                duration = row.get("duration")
+                if type(duration) not in (int, float):
+                    continue
+                if math.isfinite(duration) and duration <= minimum:
+                    return default_length
+                when = _parse_time(row)
+                if when is not None and (end := _duration_end(when, duration)) is not None:
+                    return max(default_length, end - when)
+            if len(rows) < count:
+                return default_length
+        raise NightscoutConnectionError("Incomplete legacy Nightscout duration search")
+
+    async def async_get_calendar_treatments(
+        self, start: datetime, end: datetime, default_length: timedelta,
+    ) -> list[Treatment]:
+        """Read treatments starting within or overlapping a calendar range."""
+        start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+        if start >= end:
+            return []
+
+        available_history = start - datetime.min.replace(tzinfo=timezone.utc)
+        brief_start = _calendar_iso(start - min(default_length, available_history))
+        recent = await self._calendar_range({
+            "find[created_at][$gte]": brief_start,
+            "find[created_at][$lte]": _calendar_iso(end),
+        })
+        if available_history <= default_length:
+            return parse_treatments(recent)
+
+        lookback = await self._calendar_lookback(brief_start, default_length)
+        earliest = _calendar_iso(start - min(lookback, available_history))
+        if earliest == brief_start:
+            return parse_treatments(recent)
+
+        earlier = await self._calendar_range({
+            "find[created_at][$gte]": earliest,
+            "find[created_at][$lt]": brief_start,
+            "find[duration][$type]": "number",
+        })
+        # The ranges are disjoint. Keep the newer-window copy if a record's
+        # timestamp was edited between reads. Preserve distinct anonymous rows.
+        recent_ids = {
+            str(uid) for row in recent if (uid := row.get("_id") or row.get("identifier"))
+        }
+        earlier = [
+            row for row in earlier
+            if str(row.get("_id") or row.get("identifier")) not in recent_ids
+        ]
+        return parse_treatments(earlier + recent)
 
     async def async_get_data(
         self, past: timedelta = timedelta(hours=48), ahead: timedelta = timedelta(days=62)
