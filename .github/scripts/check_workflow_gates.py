@@ -16,7 +16,7 @@ SUCCESS = "needs.preflight.result == 'success'"
 OPT_IN = "vars.CODEQL_ADVANCED_ENABLED == 'true'"
 READ = {"contents": "read"}
 SECURITY_WRITE = {**READ, "security-events": "write"}
-KNOWN_VALIDATE_JOBS = {"preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha", "codeql"}
+KNOWN_VALIDATE_JOBS = {"preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha", "codeql-enabled", "codeql"}
 
 
 class WorkflowLoader(yaml.SafeLoader):
