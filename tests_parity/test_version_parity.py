@@ -182,7 +182,14 @@ def test_same_seed_and_read_scope_agree_on_stock_measurements(stock, stock_versi
         assert status["version"] == STOCK_VERSION and status["status"] == "ok" and status["apiEnabled"] is True
     settings = {key: legacy_status[1]["settings"][key] for key in SETTINGS}
     assert {key: legacy_status[2]["settings"][key] for key in SETTINGS} == settings
-    assert all(type(value) in (int, float) and value >= 30 for value in settings["thresholds"].values())
+    # Served in mg/dL (lib/settings.js); stock.sh sets BG_LOW=0 for exactly one site, and a 0 stays 0.
+    thresholds = settings["thresholds"]
+    assert all(type(value) in (int, float) for value in thresholds.values())
+    assert all(value >= 30 for key, value in thresholds.items() if key != "bgLow")
+    if stock.profile == "mgdl-custom":
+        assert thresholds["bgLow"] == 0
+    else:
+        assert thresholds["bgLow"] >= 30
     assert type(settings["alarmTimeagoWarn"]) is bool
     assert type(settings["alarmTimeagoUrgent"]) is bool
     # stock.sh sets WARN_MINS in the environment for exactly one site.
