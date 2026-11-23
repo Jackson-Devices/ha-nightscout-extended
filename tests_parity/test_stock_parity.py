@@ -520,7 +520,12 @@ async def test_latest_unusable_stock_row_suppresses_older_alarm(hass: HomeAssist
 async def test_card_change_text_matches_nightscout(hass: HomeAssistant, stock, seeded):
     """The card's change text equals Nightscout's own `delta.display` for the seeded readings."""
     settings = stock.get("/api/v1/status.json")["settings"]
-    delta = stock.get("/api/v2/properties/delta").get("delta") or {}
+    # Stock briefly serves an empty delta while it reloads its data; wait for a computed one.
+    deadline = time.monotonic() + 90
+    while not (delta := stock.get("/api/v2/properties/delta").get("delta") or {}).get("display"):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(3)
     await _setup(hass, stock)
     case = {
         "glucose": hass.states.get("sensor.parity_glucose").as_dict(),
