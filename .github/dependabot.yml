@@ -22,6 +22,7 @@ updates:
     directories:
       - /tests
       - /tests_ha
+      - /tests_parity
     schedule:
       interval: weekly
       day: monday
