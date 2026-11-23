@@ -18,7 +18,7 @@ READ = {"contents": "read"}
 SECURITY_WRITE = {**READ, "security-events": "write"}
 KNOWN_VALIDATE_JOBS = {
     "preflight", "hassfest", "hacs", "tests", "tests-card", "tests-ha",
-    "lint", "dependency-review", "pr-policy", "codeql-enabled", "codeql",
+    "lint", "dependency-review", "codeql-enabled", "codeql",
 }
 
 
@@ -108,6 +108,7 @@ def check_entry_jobs(name, jobs, has_parity, error):
         "validate.yml": KNOWN_VALIDATE_JOBS | ({"parity"} if has_parity else set()),
         "codeql.yml": {"preflight", "scan"},
         "release.yml": {"preflight", "release"},
+        "pr-policy.yml": {"preflight", "pr-policy"},
     }[name]
     if required - jobs.keys():
         error(f"required jobs missing: {', '.join(sorted(required - jobs.keys()))}")
@@ -157,6 +158,9 @@ def validate(root):
         "codeql.yml": {"workflow_dispatch": None},
         "codeql-scan.yml": {"workflow_call": None},
         "release.yml": {"push": {"tags": ["v*"]}},
+        "pr-policy.yml": {
+            "pull_request": {"types": ["opened", "edited", "synchronize", "reopened", "ready_for_review"]},
+        },
     }
     has_parity = "parity.yml" in paths
     if has_parity:
@@ -199,7 +203,7 @@ def validate(root):
                 isinstance(step, dict) and "continue-on-error" in step for step in steps
             ):
                 error(f"{job_id} cannot use continue-on-error")
-        if name in {"validate.yml", "release.yml", "codeql.yml"}:
+        if name in {"validate.yml", "release.yml", "codeql.yml", "pr-policy.yml"}:
             check_entry_jobs(name, jobs, has_parity, error)
             continue
         if name == "workflow-lint.yml":

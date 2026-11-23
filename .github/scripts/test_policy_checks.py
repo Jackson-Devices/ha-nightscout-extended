@@ -63,6 +63,28 @@ class PullRequestPolicyTests(unittest.TestCase):
         body = self.filled().replace("## Exception register (U-8)", "")
         self.assertIn("missing section: ## Exception register (U-8)", template_errors(body))
 
+    def test_empty_section_is_rejected(self):
+        body = self.filled().replace("## Scope (U-7)\nfilled in", "## Scope (U-7)\n")
+        self.assertIn("empty section (write the content, or N/A with a reason): ## Scope (U-7)", template_errors(body))
+
+    def test_comment_only_section_is_rejected(self):
+        body = self.filled().replace("## Summary\nfilled in", "## Summary\n<!-- What changes -->")
+        self.assertTrue(any("empty section" in e and "Summary" in e for e in template_errors(body)))
+
+    def test_headings_only_is_rejected(self):
+        self.assertEqual(len(template_errors("\n".join(REQUIRED_HEADINGS))), len(REQUIRED_HEADINGS))
+
+    def test_not_applicable_counts_as_content(self):
+        heading = "## Changed test assertions (U-6)\n"
+        body = self.filled().replace(heading + "filled in", heading + "N/A")
+        self.assertEqual(template_errors(body), [])
+
+    def test_heading_text_must_match_the_whole_heading(self):
+        body = self.filled().replace("## Summary", "## Summary of nothing")
+        self.assertEqual(template_errors(body), [])  # a suffix after a space is allowed (e.g. head SHA)
+        body = self.filled().replace("## Summary", "Summary")
+        self.assertIn("missing section: ## Summary", template_errors(body))
+
     def test_placeholder_is_rejected(self):
         self.assertTrue(template_errors(self.filled() + "\n- Nightscout commit: `<sha>`"))
 
